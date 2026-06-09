@@ -136,3 +136,19 @@ input[type="checkbox"]:checked {
 .custom-scrollbar::-webkit-scrollbar { width: 4px; }
 .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
 .custom-scrollbar::-webkit-scrollbar-thumb { background: #584237; }
+
+/* Alarme DANGER : clignotement fort + halo rouge pulsant */
+@keyframes alarm {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.25; transform: scale(1.04); }
+}
+.alarm { animation: alarm 0.4s steps(1, end) infinite; }
+
+@keyframes danger-edge {
+  0%, 100% { box-shadow: inset 0 0 0 0 rgba(239, 68, 68, 0); }
+  50% { box-shadow: inset 0 0 70px 10px rgba(239, 68, 68, 0.55); }
+}
+.danger-edge { animation: danger-edge 0.7s ease-in-out infinite; }
+
+/* Indication danger fixe (sans clignotement) */
+.danger-static { box-shadow: inset 0 0 50px 6px rgba(239, 68, 68, 0.4); }

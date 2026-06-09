@@ -20,19 +20,31 @@ interface Junction {
   cross?: boolean;
 }
 
-const JUNCTIONS: Junction[] = [
-  { top: 3, bot: 4, annL: 368.762, carL: 370.262, carR: 372.879, annR: 374.379, pcv: { name: "PCV SIDI EL AIDI", pk: 371.505 }, base: { name: "BASE TRAVAUX SIDI EL AIDI", pk: 371.6 }, cross: true },
-  { top: 5, bot: 6, annL: 388.933, carL: 390.433, carR: 392.708, annR: 394.208, pcv: { name: "PCV SETTAT", pk: 391.57 }, cross: true },
-  { top: 7, bot: 8, annL: 409.875, carL: 411.375, carR: 414.971, annR: 416.471, pcv: { name: "PCVE EL KHEMSSET", pk: 413.184 }, cross: true },
-  { top: 9, bot: 10, annL: 440.731, carL: 442.231, carR: 444.506, annR: 446.006, pcv: { name: "PCV SIDI ABDELLAH", pk: 443.369 }, cross: true },
-  { top: 11, bot: 12, annL: 476.342, carL: 477.842, carR: 484.927, annR: 486.427, pcv: { name: "PCV BENGUERIR", pk: 479.106 }, gare: { name: "GARE VILLE VERTE", pk: 483.25 }, base: { name: "BASE TRAVAUX BENGUERIR", pk: 479.2 }, cross: true },
-  { top: 13, bot: 14, annL: 504.969, carL: 506.469, carR: 508.744, annR: 510.244, pcv: { name: "PCV SIDI BOU OTHMAN", pk: 507.606 }, cross: true },
-  { top: 15, bot: 16, annL: 530.17, carL: 531.67, carR: 533.045, annR: 534.545, pcv: { name: "PCV KOUDIA EL BEIDA", pk: 532.807 }, cross: true },
+// Ligne découpée en tronçons de 60 km : un poste (croisement) à chaque limite.
+const CASA = 351.5;
+const SECTOR_LEN = 60; // longueur d'un secteur (km)
+// Limites internes des secteurs (= emplacement des postes) : 411.5, 471.5, 531.5, 591.5
+const BOUNDS = [1, 2, 3, 4].map((k) => CASA + k * SECTOR_LEN);
+const PCV_NAMES = [
+  "PCV SIDI EL AIDI",
+  "PCV SETTAT",
+  "PCV BENGUERIR",
+  "PCV SIDI BOU OTHMAN",
 ];
+const JUNCTIONS: Junction[] = BOUNDS.map((b, k) => ({
+  top: 2 * k + 1,
+  bot: 2 * k + 2,
+  annL: b - 3,
+  carL: b - 1.5,
+  carR: b + 1.5,
+  annR: b + 3,
+  pcv: { name: PCV_NAMES[k], pk: b },
+  cross: true,
+}));
 
 const LIMITS = [
-  { name: "Limite VCBT1 / VCBT2", pk: 351.5 },
-  { name: "Limite VCBT2 / TVE 4", pk: 538.145 },
+  { name: "Limite VCBT1 / VCBT2", pk: CASA },
+  { name: "Limite VCBT2 / TVE 4", pk: CASA + 300 - 13 },
 ];
 
 interface Secteur {
@@ -41,30 +53,19 @@ interface Secteur {
   b: number;
   travaux?: boolean; // ZT / chantier dans le secteur
 }
-// Voie 1 — secteurs parcourus par TTx-01
-const SECT_V1: Secteur[] = [
-  { label: "Secteur Fin de chantier - 3", a: 351.5, b: 370.262 },
-  { label: "Secteur 3 - 5", a: 372.879, b: 390.433 },
-  { label: "Secteur 5 - 7", a: 392.708, b: 411.375, travaux: true },
-  { label: "Secteur 7 - 9", a: 414.971, b: 442.231 },
-  { label: "Secteur 9 - 11", a: 444.506, b: 477.842 }, // occupé par un autre train
-  { label: "Secteur 11 - 13", a: 484.927, b: 506.469 },
-  { label: "Secteur 13 - 15", a: 508.744, b: 531.67 },
-  { label: "Secteur 15 - Fin de chantier", a: 533.045, b: 538.145, travaux: true },
-];
-const SECT_V2: Secteur[] = [
-  { label: "Secteur Fin de chantier - 4", a: 351.5, b: 370.262 },
-  { label: "Secteur 4 - 6", a: 372.879, b: 390.433 },
-  { label: "Secteur 6 - 8", a: 392.708, b: 411.375 },
-  { label: "Secteur 8 - 10", a: 414.971, b: 442.231 },
-  { label: "Secteur 10 - 12", a: 444.506, b: 477.842 },
-  { label: "Secteur 12 - 14", a: 484.927, b: 506.469 },
-  { label: "Secteur 14 - 16", a: 508.744, b: 531.67 },
-  { label: "Secteur 16 - Fin de chantier", a: 533.045, b: 538.145 },
-];
+// 5 secteurs de 60 km (Voie 1 = parcours de TTx-01)
+const makeSectors = () =>
+  Array.from({ length: 5 }, (_, k) => ({
+    label: `Secteur ${k + 1}`,
+    a: CASA + k * SECTOR_LEN,
+    b: CASA + (k + 1) * SECTOR_LEN,
+  }));
+const SECT_V1: Secteur[] = makeSectors();
+SECT_V1[1].travaux = true; // Secteur 2 : travaux
+const SECT_V2: Secteur[] = makeSectors();
 
 // Occupation par un autre train (index secteur V1)
-const OCC_INDEX = 4;
+const OCC_INDEX = 2; // Secteur 3 occupé par MAT-88
 const OCC_TRAIN = "MAT-88";
 const occPk = (SECT_V1[OCC_INDEX].a + SECT_V1[OCC_INDEX].b) / 2;
 
@@ -75,9 +76,9 @@ const distOf = (i: number) =>
   (SECT_V1[i].b - SECT_V1[i].a).toFixed(1) + " km";
 const motifText = (i: number) =>
   i === OCC_INDEX ? `occupé par ${OCC_TRAIN}` : "en TRAVAUX";
-// Poste protégeant l'entrée d'un secteur (carré droit ≈ début secteur)
+// Poste protégeant l'entrée d'un secteur (poste situé à la limite du secteur)
 const junctionBefore = (i: number) =>
-  JUNCTIONS.find((jj) => Math.abs(jj.carR - SECT_V1[i].a) < 0.05);
+  JUNCTIONS.find((jj) => Math.abs((jj.carL + jj.carR) / 2 - SECT_V1[i].a) < 0.1);
 const posteBefore = (i: number) => {
   const j = junctionBefore(i);
   return j ? j.top : null;
@@ -96,15 +97,14 @@ const nearestCrossPoste = (pk: number) => {
   }
   return best;
 };
-const APPROACH_KM = 3; // distance d'alerte avant un secteur bloqué
-const CROSS_LEN = 2.2; // longueur (km) de la traversée diagonale du croisement
+const SECTOR_KM = 60; // zone d'attention avant un secteur bloqué
+const HALF_KM = SECTOR_KM / 2; // 30 km : déclenchement du son d'alarme
 
-const CASA = 351.5;
-const MARRAKECH = 539.145;
+const MARRAKECH = CASA + 300; // ligne Casa → Marrakech = 300 km
 
 // Échelle PK → px
 const MIN_PK = 350;
-const PX_PER_KM = 38;
+const PX_PER_KM = 24;
 const MARGIN = 150;
 const pkToPx = (pk: number) => (pk - MIN_PK) * PX_PER_KM + MARGIN;
 const TRACK_WIDTH = pkToPx(MARRAKECH) + MARGIN;
@@ -132,10 +132,13 @@ export default function Home() {
   const crossRoute = useRef<
     { startPK: number; endPK: number; fromY: number; toY: number } | null
   >(null); // traversée diagonale en cours
+  const pendingRoute = useRef<{ idx: number; side: "L" | "R" } | null>(null); // itinéraire tracé d'avance
   const occActive = useRef(true); // MAT-88 occupe encore son secteur
   const occTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastStatus = useRef("");
   const lastAlert = useRef("");
+  const audioCtx = useRef<AudioContext | null>(null);
+  const alarmTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const addLog = (msg: string) => {
     const time = new Date().toTimeString().split(" ")[0];
@@ -249,6 +252,47 @@ export default function Home() {
     if (mode === "stop") addLog(`[STOP] TTx-01 ${msg}`);
   };
 
+  // Klaxon d'alarme via Web Audio (deux tons)
+  const playDanger = () => {
+    try {
+      const w = window as Window & { webkitAudioContext?: typeof AudioContext };
+      const Ctx = window.AudioContext || w.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = audioCtx.current ?? new Ctx();
+      audioCtx.current = ctx;
+      if (ctx.state === "suspended") ctx.resume();
+      const beep = (freq: number, start: number, dur: number) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = "square";
+        o.frequency.value = freq;
+        o.connect(g);
+        g.connect(ctx.destination);
+        const t0 = ctx.currentTime + start;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(0.18, t0 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        o.start(t0);
+        o.stop(t0 + dur + 0.03);
+      };
+      beep(900, 0, 0.16);
+      beep(680, 0.2, 0.16);
+    } catch {
+      /* audio indisponible */
+    }
+  };
+  const startAlarm = () => {
+    if (alarmTimer.current) return;
+    playDanger();
+    alarmTimer.current = setInterval(playDanger, 1300);
+  };
+  const stopAlarm = () => {
+    if (alarmTimer.current) {
+      clearInterval(alarmTimer.current);
+      alarmTimer.current = null;
+    }
+  };
+
   // Pile de notifications danger (toasts). Dédup via `key`.
   const pushAlerts = (
     key: string,
@@ -263,7 +307,7 @@ export default function Home() {
       const d = document.createElement("div");
       const tone =
         c.tone === "danger"
-          ? "bg-red-900/95 border-red-500 text-white blink-red"
+          ? "bg-red-900/95 border-red-500 text-white"
           : c.tone === "warn"
           ? "bg-[#3a2400]/95 border-amber-500 text-amber-300"
           : "bg-secondary/20 border-secondary text-secondary";
@@ -356,35 +400,36 @@ export default function Home() {
     JUNCTIONS.forEach((j, k) => {
       if (!j.cross) return;
       const on = k === idx;
-      (["L", "R"] as const).forEach((s) => {
-        const b = document.getElementById(`aig-${k}-${s}`);
-        if (b) {
-          b.classList.toggle("opacity-30", !on);
-          b.classList.toggle("border-secondary", on);
-          b.classList.toggle("text-secondary", on);
-          b.classList.toggle("animate-pulse", on);
-        }
-      });
+      // ◣ gauche : simplement disponible quand armé
+      const bL = document.getElementById(`aig-${k}-L`);
+      if (bL) bL.classList.toggle("opacity-30", !on);
+      // ◢ droite : clignote et ressort (action recommandée)
+      const bR = document.getElementById(`aig-${k}-R`);
+      if (bR) {
+        bR.classList.toggle("opacity-30", !on);
+        bR.classList.toggle("blink-red", on);
+        bR.classList.toggle("bg-secondary", on);
+        bR.classList.toggle("text-on-secondary", on);
+        bR.classList.toggle("border-secondary", on);
+        bR.classList.toggle("scale-125", on);
+      }
+      // petit message "Changez la voie ici"
+      const lbl = document.getElementById(`aiglabel-${k}`);
+      if (lbl) lbl.classList.toggle("hidden", !on);
     });
   };
 
-  // Aiguillage GAUCHE/DROITE au poste : route le train sur l'autre voie
-  const routeVoie = (idx: number, side: "L" | "R") => {
+  // Exécute la traversée diagonale au croisement (carL → carR)
+  const doCross = (idx: number, side: "L" | "R") => {
     const j = JUNCTIONS[idx];
-    if (nearestCrossPoste(trainPK.current) !== j) {
-      addLog(`[AIG] Poste ${j.top}: train trop loin pour aiguiller`);
-      return;
-    }
     const crossPk = side === "L" ? j.carL : j.carR;
     const from = trainVoie.current;
     const to = from === 1 ? 2 : 1;
     trainVoie.current = to;
-    // Le train suit la diagonale de la communication jusqu'au carré opposé (apex du V)
-    const startPK = trainPK.current;
-    const endPK = j.carR > startPK + 0.3 ? j.carR : startPK + CROSS_LEN;
+    const startPK = Math.min(Math.max(trainPK.current, j.carL), j.carR - 0.3);
     crossRoute.current = {
       startPK,
-      endPK,
+      endPK: j.carR,
       fromY: from === 1 ? V1_Y : V2_Y,
       toY: to === 1 ? V1_Y : V2_Y,
     };
@@ -392,13 +437,38 @@ export default function Home() {
     if (vv) vv.textContent = "V" + to;
     const cv = document.getElementById("card-voie");
     if (cv) cv.textContent = String(to);
-    // branche choisie en vert, l'autre en rouge
     document.getElementById(`xl-${idx}`)?.setAttribute("stroke", side === "L" ? "#4ae176" : "#ef4444");
     document.getElementById(`xr-${idx}`)?.setAttribute("stroke", side === "R" ? "#4ae176" : "#ef4444");
+    pendingRoute.current = null;
     lastStatus.current = "";
     addLog(
-      `[AIG] Poste ${j.top}/${j.bot} — itinéraire ${side === "L" ? "GAUCHE" : "DROITE"} (PK ${fmtPK(crossPk)}) — Voie ${from} → ${to}`
+      `[AIG] Poste ${j.top}/${j.bot} — bascule ${side === "L" ? "GAUCHE" : "DROITE"} (PK ${fmtPK(crossPk)}) — Voie ${from} → ${to}`
     );
+  };
+
+  // Clic aiguille : bascule immédiate si au croisement, sinon ITINÉRAIRE TRACÉ (bascule au poste)
+  const routeVoie = (idx: number, side: "L" | "R") => {
+    const j = JUNCTIONS[idx];
+    const armed = armRef.current === idx;
+    const near = nearestCrossPoste(trainPK.current) === j;
+    if (!armed && !near) {
+      addLog(`[AIG] Poste ${j.top}: train trop loin pour aiguiller`);
+      return;
+    }
+    if (trainPK.current >= j.carL - 1) {
+      doCross(idx, side); // déjà au croisement
+    } else {
+      pendingRoute.current = { idx, side };
+      const bR = document.getElementById(`aig-${idx}-R`);
+      if (bR && side === "R") {
+        bR.classList.remove("blink-red");
+        bR.classList.add("bg-secondary", "text-on-secondary");
+      }
+      const lbl = document.getElementById(`aiglabel-${idx}`);
+      if (lbl) lbl.textContent = `Itinéraire ◢ tracé ✓ (Poste ${j.top})`;
+      lastStatus.current = "";
+      addLog(`[AIG] Itinéraire ${side === "L" ? "GAUCHE" : "DROITE"} tracé au Poste ${j.top} — bascule à l'arrivée`);
+    }
   };
 
   useEffect(() => {
@@ -444,6 +514,14 @@ export default function Home() {
         const moving = newPk > trainPK.current + 1e-6;
         trainPK.current = newPk;
 
+        // Itinéraire tracé : bascule automatique à l'arrivée au croisement
+        if (pendingRoute.current) {
+          const pj = JUNCTIONS[pendingRoute.current.idx];
+          if (trainPK.current >= pj.carL - 1)
+            doCross(pendingRoute.current.idx, pendingRoute.current.side);
+        }
+        let armIdx = -1;
+
         if (trainEl) {
           trainEl.style.left = pkToPx(trainPK.current) + "px";
           // top : diagonale pendant la traversée du croisement, sinon voie courante
@@ -476,41 +554,58 @@ export default function Home() {
             { text: `👉 Cliquez ◢ DROITE (ou ◣ GAUCHE) au Poste ${n} pour changer de voie`, tone: "danger" },
             { text: `… ou attendez la libération du secteur`, tone: "warn" },
           ]);
+          startAlarm();
+          armIdx = JUNCTIONS.findIndex((jj) => jj === junctionBefore(stopIdx));
         } else if (trainVoie.current === 1) {
-          // Alerte d'approche d'un secteur occupé / en travaux
+          // Zone d'attention de 60 km avant un secteur bloqué
           let appr = -1;
+          let stopPk = 0;
           for (let i = 0; i < SECT_V1.length; i++) {
-            const a = SECT_V1[i].a;
-            if (isBlocked(i) && a > trainPK.current && a - trainPK.current <= APPROACH_KM) {
+            if (!isBlocked(i)) continue;
+            const sp = junctionBefore(i)?.carL ?? SECT_V1[i].a;
+            if (trainPK.current >= sp - SECTOR_KM && trainPK.current < sp) {
               appr = i;
+              stopPk = sp;
               break;
             }
           }
           if (appr >= 0) {
             const n = posteBefore(appr) ?? "?";
-            const d = (SECT_V1[appr].a - trainPK.current).toFixed(1);
+            const d = Math.max(0, stopPk - trainPK.current);
+            const soundOn = d <= HALF_KM; // son au 1/2 de la zone (30 km)
             setTrainStatus(
-              `appr:${SECT_V1[appr].label} ${motifText(appr)} — changer de voie au Poste ${n}`
+              `appr:${SECT_V1[appr].label} ${motifText(appr)} — basculez Voie 2 (◢ Poste ${n}) pour ne pas stopper`
             );
-            pushAlerts(`appr-${appr}`, [
-              { text: `🚨 DANGER — ${SECT_V1[appr].label} ${motifText(appr)}`, tone: "danger" },
-              { text: `⚠️ ATTENTION — TTx-01 approche (${d} km)`, tone: "warn" },
-              { text: `👉 Préparez l'aiguillage ◢ au Poste ${n}`, tone: "warn" },
-            ]);
+            const cards: { text: string; tone: "danger" | "warn" | "ok" }[] = [
+              { text: `🚨 DANGER — secteur suivant ${SECT_V1[appr].label} ${motifText(appr)}`, tone: "danger" },
+              { text: `⚠️ ATTENTION — arrêt dans ${d.toFixed(0)} km si rien n'est fait`, tone: "warn" },
+              { text: `👉 Cliquez ◢ DROITE au Poste ${n} → Voie 2 (évite l'arrêt)`, tone: "warn" },
+            ];
+            if (soundOn) cards.push({ text: `🔊 ALARME — mi-distance : basculez MAINTENANT`, tone: "danger" });
+            pushAlerts(`appr-${appr}-${Math.ceil(d)}`, cards);
+            if (soundOn) startAlarm();
+            else stopAlarm();
+            // arme le poste du secteur bloqué dès l'entrée du secteur actif
+            armIdx = JUNCTIONS.findIndex((jj) => jj === junctionBefore(appr));
           } else {
             setTrainStatus("move:Voie 1 — circulation normale");
             pushAlerts("clear1", []);
+            stopAlarm();
           }
         } else {
           setTrainStatus("move:Voie 2 (contre-voie) — circulation normale");
           pushAlerts("cross-ok", [
             { text: `✔ Voie 2 (contre-voie) — secteur contourné`, tone: "ok" },
           ]);
+          stopAlarm();
         }
 
-        // Arme l'aiguillage du poste le plus proche
-        const nearJ = nearestCrossPoste(trainPK.current);
-        armAiguillage(nearJ ? JUNCTIONS.indexOf(nearJ) : -1);
+        // Arme l'aiguillage : poste du secteur bloqué visé, sinon poste le plus proche
+        if (armIdx < 0) {
+          const nearJ = nearestCrossPoste(trainPK.current);
+          armIdx = nearJ ? JUNCTIONS.indexOf(nearJ) : -1;
+        }
+        armAiguillage(armIdx);
       }
       raf = requestAnimationFrame(animate);
     };
@@ -520,6 +615,7 @@ export default function Home() {
       clearInterval(clockId);
       cancelAnimationFrame(raf);
       if (occTimer.current) clearTimeout(occTimer.current);
+      stopAlarm();
     };
   }, []);
 
@@ -726,6 +822,7 @@ export default function Home() {
                     <>
                       <button id={`aig-${ji}-L`} onClick={() => routeVoie(ji, "L")} title={`Aiguille GAUCHE — Poste ${j.top} (PK ${fmtPK(j.carL)})`} className="absolute -translate-x-1/2 -translate-y-1/2 z-30 w-4 h-4 flex items-center justify-center text-[10px] bg-surface-container-highest border border-outline-variant text-on-surface-variant hover:text-secondary opacity-30" style={{ left: pkToPx(j.carL), top: (V1_Y + V2_Y) / 2 + 22 }}>◣</button>
                       <button id={`aig-${ji}-R`} onClick={() => routeVoie(ji, "R")} title={`Aiguille DROITE — Poste ${j.top} (PK ${fmtPK(j.carR)})`} className="absolute -translate-x-1/2 -translate-y-1/2 z-30 w-4 h-4 flex items-center justify-center text-[10px] bg-surface-container-highest border border-outline-variant text-on-surface-variant hover:text-secondary opacity-30" style={{ left: pkToPx(j.carR), top: (V1_Y + V2_Y) / 2 + 22 }}>◢</button>
+                      <div id={`aiglabel-${ji}`} className="absolute -translate-x-1/2 z-30 hidden text-[9px] font-label-bold text-secondary blink-red whitespace-nowrap pointer-events-none bg-surface-container px-1 border border-secondary" style={{ left: pkToPx(j.carR), top: (V1_Y + V2_Y) / 2 + 4 }}>Changez la voie ici ↧</div>
                     </>
                   )}
                 </span>
@@ -762,9 +859,9 @@ export default function Home() {
         <aside className="fixed right-0 top-[40px] bottom-[30px] w-[210px] z-40 bg-surface-container border-l border-outline-variant flex flex-col overflow-hidden">
           <div className="grid grid-cols-2 gap-px bg-outline-variant border-b border-outline-variant">
             <div className="bg-surface-container p-unit-2 flex flex-col"><span className="text-[9px] font-label-bold text-on-surface-variant opacity-60">TRAINS ACTIFS</span><span className="text-headline font-telemetry text-primary">02</span></div>
-            <div className="bg-surface-container p-unit-2 flex flex-col"><span className="text-[9px] font-label-bold text-on-surface-variant opacity-60">SECTEURS</span><span className="text-headline font-telemetry text-secondary">16</span></div>
+            <div className="bg-surface-container p-unit-2 flex flex-col"><span className="text-[9px] font-label-bold text-on-surface-variant opacity-60">SECTEURS</span><span className="text-headline font-telemetry text-secondary">05</span></div>
             <div className="bg-surface-container p-unit-2 flex flex-col"><span className="text-[9px] font-label-bold text-on-surface-variant opacity-60">BLOQUÉS</span><span id="blk-count" className="text-headline font-telemetry text-error">03</span></div>
-            <div className="bg-surface-container p-unit-2 flex flex-col"><span className="text-[9px] font-label-bold text-on-surface-variant opacity-60">POSTES</span><span className="text-headline font-telemetry text-amber-500">14</span></div>
+            <div className="bg-surface-container p-unit-2 flex flex-col"><span className="text-[9px] font-label-bold text-on-surface-variant opacity-60">POSTES</span><span className="text-headline font-telemetry text-amber-500">08</span></div>
           </div>
 
           <div className="flex-1 flex flex-col overflow-hidden">
@@ -785,8 +882,8 @@ export default function Home() {
             <div className="p-1 px-2 bg-surface-container-high border-b border-outline-variant"><span className="text-[9px] font-label-bold text-on-surface-variant">LOG ÉVÉNEMENTS</span></div>
             <div className="flex-1 overflow-y-auto font-telemetry text-[10px] p-2 space-y-1 text-on-surface-variant/80 custom-scrollbar" id="event-log">
               <div>14:30:01 [SYS] Connexion OP. DURAND</div>
-              <div>14:31:12 [TRV] Travaux Secteur 5-7 &amp; 15-Fin</div>
-              <div>14:32:00 [OCC] {OCC_TRAIN} en Secteur 9-11</div>
+              <div>14:31:12 [TRV] Travaux Secteur 2</div>
+              <div>14:32:00 [OCC] {OCC_TRAIN} en {SECT_V1[OCC_INDEX].label}</div>
             </div>
           </div>
         </aside>
