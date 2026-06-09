@@ -1,26 +1,138 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* Design tokens ported from the SFERIS TCO Tailwind config */
+@theme {
+  --color-surface-dim: #1c110b;
+  --color-surface-container-low: #251913;
+  --color-secondary-fixed: #6bff8f;
+  --color-background: #080f18;
+  --color-secondary-container: #00b954;
+  --color-on-secondary-fixed: #002109;
+  --color-primary-fixed: #ffdbca;
+  --color-tertiary: #ffb3ad;
+  --color-tertiary-fixed-dim: #ffb3ad;
+  --color-outline-variant: #584237;
+  --color-primary-fixed-dim: #ffb690;
+  --color-on-error: #690005;
+  --color-surface-variant: #40322a;
+  --color-surface-container-lowest: #160c06;
+  --color-on-surface: #f6ded3;
+  --color-surface: #1c110b;
+  --color-on-primary-fixed: #341100;
+  --color-on-secondary-container: #004119;
+  --color-surface-tint: #ffb690;
+  --color-tertiary-container: #ff6a64;
+  --color-error-container: #93000a;
+  --color-secondary: #4ae176;
+  --color-on-tertiary-container: #6c000b;
+  --color-on-secondary: #003915;
+  --color-inverse-primary: #9d4300;
+  --color-on-error-container: #ffdad6;
+  --color-on-surface-variant: #e0c0b1;
+  --color-inverse-on-surface: #3c2d26;
+  --color-surface-container-highest: #40322a;
+  --color-on-primary-fixed-variant: #783200;
+  --color-primary-container: #f97316;
+  --color-tertiary-fixed: #ffdad7;
+  --color-on-primary-container: #582200;
+  --color-surface-container: #291d16;
+  --color-primary: #ffb690;
+  --color-on-tertiary: #68000a;
+  --color-error: #ffb4ab;
+  --color-surface-container-high: #352720;
+  --color-on-secondary-fixed-variant: #005321;
+  --color-on-tertiary-fixed-variant: #930013;
+  --color-on-background: #f6ded3;
+  --color-on-primary: #552100;
+  --color-secondary-fixed-dim: #4ae176;
+  --color-inverse-surface: #f6ded3;
+  --color-outline: #a78b7d;
+  --color-surface-bright: #45362f;
+  --color-on-tertiary-fixed: #410004;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  --spacing-base: 4px;
+  --spacing-unit-1: 4px;
+  --spacing-unit-2: 8px;
+  --spacing-unit-3: 12px;
+  --spacing-unit-4: 16px;
+  --spacing-unit-6: 24px;
+  --spacing-unit-8: 32px;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-display-md: "JetBrains Mono", monospace;
+  --font-telemetry: "JetBrains Mono", monospace;
+  --font-label-bold: "JetBrains Mono", monospace;
+  --font-body-md: "JetBrains Mono", monospace;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: "JetBrains Mono", monospace;
+  background-color: #080f18;
+  overflow: hidden;
 }
+
+.tco-grid {
+  background-image: radial-gradient(rgba(30, 58, 95, 0.2) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+.rail-sleeper {
+  background-image: repeating-linear-gradient(90deg, #5b8db8 0px, #5b8db8 2px, transparent 2px, transparent 20px);
+}
+.blink-red {
+  animation: blink 0.8s infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.gps-pulse {
+  position: relative;
+}
+.gps-pulse::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 12px;
+  border: 2px solid #4ae176;
+  border-radius: 50%;
+  animation: pulse 1.5s infinite;
+}
+@keyframes pulse {
+  0% { width: 4px; height: 4px; opacity: 1; }
+  100% { width: 24px; height: 24px; opacity: 0; }
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: #251913;
+  height: 4px;
+  border-radius: 0;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #f97316;
+  cursor: pointer;
+}
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #080f18;
+  border: 1px solid #a78b7d;
+  cursor: pointer;
+}
+input[type="checkbox"]:checked {
+  background: #ffb690;
+  border-color: #ffb690;
+}
+
+.custom-scrollbar::-webkit-scrollbar { width: 4px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: #584237; }
