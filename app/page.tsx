@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // ===========================================================================
 // SCHÉMA LIGNE CASABLANCA → MARRAKECH (transcrit des planches fournies)
@@ -104,10 +104,10 @@ const MARRAKECH = CASA + 300; // ligne Casa → Marrakech = 300 km
 
 // Échelle PK → px
 const MIN_PK = 350;
-const PX_PER_KM = 24;
 const MARGIN = 150;
-const pkToPx = (pk: number) => (pk - MIN_PK) * PX_PER_KM + MARGIN;
-const TRACK_WIDTH = pkToPx(MARRAKECH) + MARGIN;
+const PX_DEFAULT = 24; // px par km par défaut
+const ZOOM_MIN = 8;
+const ZOOM_MAX = 80;
 
 // Géométrie verticale
 const TOP_LABEL_Y = 6;
@@ -133,6 +133,12 @@ export default function Home() {
     { startPK: number; endPK: number; fromY: number; toY: number } | null
   >(null); // traversée diagonale en cours
   const pendingRoute = useRef<{ idx: number; side: "L" | "R" } | null>(null); // itinéraire tracé d'avance
+  const autoFollow = useRef(true); // recentrage auto sur le train
+  const pxRef = useRef(PX_DEFAULT); // px par km — pour la boucle d'animation
+  const [pxPerKm, setPxPerKm] = useState(PX_DEFAULT); // px par km — pour le rendu
+
+  // PK → px (rendu, dépend de l'état du zoom)
+  const pkToPx = (pk: number) => (pk - MIN_PK) * pxPerKm + MARGIN;
   const occActive = useRef(true); // MAT-88 occupe encore son secteur
   const occTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastStatus = useRef("");
@@ -154,6 +160,31 @@ export default function Home() {
     if (!m) return;
     m.classList.toggle("hidden");
     m.classList.toggle("flex");
+  };
+
+  // Zoom + / − (garde le centre de la vue stable)
+  const applyZoom = (mult: number) => {
+    const sc = document.getElementById("sector-scroll");
+    let centerPK = trainPK.current;
+    if (sc) centerPK = MIN_PK + (sc.scrollLeft + sc.clientWidth / 2 - MARGIN) / pxRef.current;
+    const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, pxRef.current * mult));
+    pxRef.current = next;
+    setPxPerKm(next);
+    requestAnimationFrame(() => {
+      const s = document.getElementById("sector-scroll");
+      if (s) s.scrollLeft = (centerPK - MIN_PK) * next + MARGIN - s.clientWidth / 2;
+    });
+  };
+
+  // Suivi auto du train (recentrage)
+  const setFollow = (on: boolean) => {
+    autoFollow.current = on;
+    const b = document.getElementById("follow-btn");
+    if (b) {
+      b.textContent = on ? "⊙ SUIVI ON" : "⊙ SUIVI OFF";
+      b.classList.toggle("text-secondary", on);
+      b.classList.toggle("text-on-surface-variant", !on);
+    }
   };
 
   // État d'un secteur (auth fourni explicitement — pas d'accès ref dans le corps).
@@ -480,6 +511,20 @@ export default function Home() {
     updateBlockedCount();
     startOccTimer();
 
+    // Molette = défilement horizontal + met le suivi en pause (l'utilisateur prend la main)
+    const onWheel = (e: WheelEvent) => {
+      if (!scroller) return;
+      if (Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
+        scroller.scrollLeft += e.deltaY;
+        e.preventDefault();
+      }
+      if (autoFollow.current) setFollow(false);
+    };
+    scroller?.addEventListener("wheel", onWheel, { passive: false });
+
+    // PK → px live (lit le zoom courant via pxRef, pour la boucle d'animation)
+    const pxAt = (pk: number) => (pk - MIN_PK) * pxRef.current + MARGIN;
+
     const clockId = setInterval(() => {
       const now = new Date();
       const clock = document.getElementById("system-clock");
@@ -523,7 +568,7 @@ export default function Home() {
         let armIdx = -1;
 
         if (trainEl) {
-          trainEl.style.left = pkToPx(trainPK.current) + "px";
+          trainEl.style.left = pxAt(trainPK.current) + "px";
           // top : diagonale pendant la traversée du croisement, sinon voie courante
           let topY = trainVoie.current === 1 ? V1_Y : V2_Y;
           const cr = crossRoute.current;
@@ -537,8 +582,8 @@ export default function Home() {
           }
           trainEl.style.top = topY + "px";
         }
-        if (scroller)
-          scroller.scrollLeft = pkToPx(trainPK.current) - scroller.clientWidth / 2;
+        if (autoFollow.current && scroller)
+          scroller.scrollLeft = pxAt(trainPK.current) - scroller.clientWidth / 2;
         const lbl = "PK " + fmtPK(trainPK.current);
         if (pkVal) pkVal.textContent = lbl;
         if (cardPk) cardPk.textContent = lbl;
@@ -616,6 +661,7 @@ export default function Home() {
       cancelAnimationFrame(raf);
       if (occTimer.current) clearTimeout(occTimer.current);
       stopAlarm();
+      scroller?.removeEventListener("wheel", onWheel);
     };
   }, []);
 
@@ -661,6 +707,8 @@ export default function Home() {
       </>
     );
   };
+
+  const TRACK_WIDTH = pkToPx(MARRAKECH) + MARGIN; // largeur dépend du zoom
 
   return (
     <>
@@ -728,6 +776,11 @@ export default function Home() {
         <main className="ml-[140px] mr-[210px] flex-1 relative tco-grid overflow-hidden" id="tco-canvas">
           {/* Pile de notifications danger (fixe au-dessus du canvas) */}
           <div id="toasts" className="absolute top-2 left-1/2 -translate-x-1/2 z-40 flex flex-col gap-1 items-center pointer-events-none"></div>
+          {/* Zoom + / − */}
+          <div className="absolute top-2 left-2 z-40 flex flex-col gap-1">
+            <button onClick={() => applyZoom(1.3)} title="Zoom avant" className="w-6 h-6 bg-surface-container border border-outline-variant text-on-surface text-[16px] leading-none font-bold hover:bg-surface-variant hover:text-primary">+</button>
+            <button onClick={() => applyZoom(1 / 1.3)} title="Zoom arrière" className="w-6 h-6 bg-surface-container border border-outline-variant text-on-surface text-[16px] leading-none font-bold hover:bg-surface-variant hover:text-primary">−</button>
+          </div>
           <div className="absolute inset-0 overflow-x-auto overflow-y-auto custom-scrollbar" id="sector-scroll">
             <div className="relative" style={{ width: TRACK_WIDTH, height: 380 }}>
               <span className="absolute font-display-md text-[13px] font-bold text-error -translate-y-1/2" style={{ left: 6, top: (V1_Y + V2_Y) / 2 }}>CASABLANCA</span>
@@ -897,6 +950,7 @@ export default function Home() {
           <div className="h-4 w-px bg-outline-variant"></div>
           <button className="px-2 h-5 bg-secondary-container text-on-secondary-container border border-outline-variant text-[9px] font-label-bold hover:opacity-90 transition" onClick={() => toggleModal("auth-modal")}>AUTORISATIONS ▸</button>
           <button id="voie-btn" className="px-2 h-5 bg-primary-container text-on-primary-container border border-outline-variant text-[9px] font-label-bold hover:opacity-90 transition opacity-40" onClick={handleChangeVoie} title="Aiguillage : changer la voie du train au poste le plus proche">⇄ CHANGER VOIE</button>
+          <button id="follow-btn" className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold text-secondary hover:opacity-90 transition" onClick={() => setFollow(!autoFollow.current)} title="Recentrage automatique sur le train (la molette le met en pause)">⊙ SUIVI ON</button>
           <div className="flex gap-unit-2">
             <button className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold hover:bg-primary-container hover:text-on-primary-container transition-colors" id="pause-btn" onClick={handlePause}>PAUSE</button>
             <button className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold hover:bg-error-container hover:text-on-error-container transition-colors" onClick={resetSimulation}>RESET</button>
