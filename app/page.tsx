@@ -34,10 +34,10 @@ const PCV_NAMES = [
 const JUNCTIONS: Junction[] = BOUNDS.map((b, k) => ({
   top: 2 * k + 1,
   bot: 2 * k + 2,
-  annL: b - 3,
-  carL: b - 1.5,
-  carR: b + 1.5,
-  annR: b + 3,
+  annL: b - 6,
+  carL: b - 3,
+  carR: b + 3,
+  annR: b + 6,
   pcv: { name: PCV_NAMES[k], pk: b },
   cross: true,
 }));
@@ -79,14 +79,12 @@ const motifText = (i: number) =>
 // Poste protégeant l'entrée d'un secteur (poste situé à la limite du secteur)
 const junctionBefore = (i: number) =>
   JUNCTIONS.find((jj) => Math.abs((jj.carL + jj.carR) / 2 - SECT_V1[i].a) < 0.1);
-const posteBefore = (i: number) => {
-  const j = junctionBefore(i);
-  return j ? j.top : null;
-};
+const junctionAt = (pk: number) =>
+  JUNCTIONS.find((jj) => Math.abs((jj.carL + jj.carR) / 2 - pk) < 0.1);
 // Poste de communication le plus proche (pour changer de voie)
 const nearestCrossPoste = (pk: number) => {
   let best: Junction | null = null;
-  let bd = 2.5;
+  let bd = 4;
   for (const j of JUNCTIONS) {
     if (!j.cross) continue;
     const d = Math.abs((j.carL + j.carR) / 2 - pk);
@@ -116,6 +114,10 @@ const V1_Y = 170;
 const V2_Y = 270;
 const POSTE_BOT_Y = 312;
 
+// Convoi articulé (loco + wagons)
+const NSEG = 6; // nombre de segments (tête + wagons + queue)
+const WAGON_LEN = 0.5; // espacement (km) entre segments
+
 const fmtPK = (pk: number) => {
   const km = Math.floor(pk);
   const m = Math.round((pk - km) * 1000);
@@ -126,9 +128,22 @@ export default function Home() {
   const trainPK = useRef(CASA);
   const speed = useRef(40);
   const isPaused = useRef(false);
-  const authSect = useRef<boolean[]>(SECT_V1.map(() => false)); // autorisation par secteur
+  const dir = useRef(1); // sens : +1 aller (→), -1 retour (←)
+  const holdUntil = useRef(0); // arrêt temporaire au terminus (timestamp ms)
+  const authSect = useRef<Record<number, boolean[]>>({
+    1: SECT_V1.map(() => false),
+    2: SECT_V2.map(() => false),
+  }); // autorisation par voie + secteur
+  const travauxRef = useRef<Record<number, boolean[]>>({
+    1: SECT_V1.map((s) => !!s.travaux),
+    2: SECT_V2.map((s) => !!s.travaux),
+  }); // travaux par voie + secteur
+  const curSec = useRef(-1); // index du secteur courant du convoi
+  const curVoie = useRef(1); // voie du secteur courant
   const trainVoie = useRef(1); // voie courante du train (1 ou 2)
-  const armRef = useRef(-1); // poste dont l'aiguillage est armé (train proche)
+  const armRef = useRef(""); // clé d'état des icônes (dédup du rafraîchissement)
+  const aigEnabled = useRef(true); // l'admin a activé l'aiguillage (ON par défaut)
+  const soundEnabled = useRef(true); // son de l'alarme danger
   const crossRoute = useRef<
     { startPK: number; endPK: number; fromY: number; toY: number } | null
   >(null); // traversée diagonale en cours
@@ -199,54 +214,108 @@ export default function Home() {
     "absolute left-1/2 -translate-x-1/2 -top-3 text-[8px] font-telemetry whitespace-nowrap ";
   const SEG_BASE = "absolute h-[3px] -translate-y-1/2 z-10 cursor-pointer ";
 
-  const updateSectorDOM = (i: number) => {
-    const auth = authSect.current[i];
-    const work = !!SECT_V1[i].travaux || (i === OCC_INDEX && occActive.current);
+  // État "travaux/occupé" dynamique par voie (lit travauxRef — hors rendu)
+  const workNow = (v: number, i: number) =>
+    travauxRef.current[v][i] || (v === 1 && i === OCC_INDEX && occActive.current);
+  const reasonNow = (v: number, i: number) =>
+    travauxRef.current[v][i]
+      ? "TRAVAUX"
+      : v === 1 && i === OCC_INDEX && occActive.current
+      ? `OCCUPÉ ${OCC_TRAIN}`
+      : "";
+  // Motif pour les messages (voie courante)
+  const motifNow = (i: number) => {
+    const v = trainVoie.current;
+    return v === 1 && i === OCC_INDEX && occActive.current && !travauxRef.current[1][i]
+      ? `occupé par ${OCC_TRAIN}`
+      : "en TRAVAUX";
+  };
+
+  // Couleur de la ligne par secteur et par voie :
+  // rouge (danger) / bleu vif (occupé) / vert (autorisé) / orange (franchi)
+  const paintSeg = (voie: number, i: number) => {
+    const seg = document.getElementById(`seg-${voie}-${i}`) as HTMLElement | null;
+    if (!seg) return;
+    const work = workNow(voie, i);
+    const auth = authSect.current[voie][i];
+    let bg = "transparent"; // libre / normal (rail bleu) ; l'orange du secteur en cours = cur-trail
+    let blink = false;
+    if (work && !auth) { bg = "rgba(220,38,38,0.85)"; blink = true; } // occupé (rouge)
+    else if (work && auth) bg = "rgba(74,225,118,0.85)"; // autorisé (vert)
+    seg.style.background = bg;
+    seg.classList.toggle("blink-red", blink);
+  };
+
+  // Rafraîchit l'affichage d'un secteur (voie + index) : couleur, libellé, badges, boutons
+  const refreshSector = (v: number, i: number) => {
+    const auth = authSect.current[v][i];
+    const work = workNow(v, i);
     const blocked = work && !auth;
-    const state = blocked ? reasonOf(i) : work && auth ? "AUTORISÉ" : "LIBRE";
-    const label = document.getElementById(`seclabel-${i}`);
-    const seg = document.getElementById(`seg-${i}`);
-    const badge = document.getElementById(`secbadge-${i}`);
-    const btn = document.getElementById(`secbtn-${i}`);
-    if (label) {
-      label.textContent = `${SECT_V1[i].label} · ${distOf(i)}${
-        work ? " · " + state : ""
-      }`;
-      label.className =
-        SECLABEL_BASE +
-        (blocked ? "text-error" : work && auth ? "text-secondary" : "text-on-surface-variant");
+    const state = blocked ? reasonNow(v, i) : work && auth ? "AUTORISÉ" : "LIBRE";
+    paintSeg(v, i);
+    if (v === 1) {
+      const label = document.getElementById(`seclabel-1-${i}`);
+      if (label) {
+        label.textContent = `${SECT_V1[i].label} · ${distOf(i)}${work ? " · " + state : ""}`;
+        label.className =
+          SECLABEL_BASE +
+          (blocked ? "text-error" : work && auth ? "text-secondary" : "text-on-surface-variant");
+      }
     }
-    if (seg) {
-      seg.className = SEG_BASE + (blocked ? "bg-red-600/80 blink-red" : "bg-secondary/80");
-    }
+    const badge = document.getElementById(`secbadge-${v}-${i}`);
     if (badge) {
       badge.textContent = state;
       badge.className =
         "text-[9px] font-label-bold px-1 " +
         (blocked ? "bg-red-600 text-white" : "bg-secondary/15 text-secondary");
     }
+    const btn = document.getElementById(`secbtn-${v}-${i}`);
     if (btn) btn.textContent = auth ? "RETIRER" : "AUTORISER";
+  };
+  const refreshAll = () => {
+    [1, 2].forEach((v) => SECT_V1.forEach((_, i) => refreshSector(v, i)));
   };
 
   const updateBlockedCount = () => {
-    const n = SECT_V1.filter(
-      (s, i) =>
-        (!!s.travaux || (i === OCC_INDEX && occActive.current)) &&
-        !authSect.current[i]
-    ).length;
+    let n = 0;
+    [1, 2].forEach((v) =>
+      SECT_V1.forEach((_, i) => {
+        if (workNow(v, i) && !authSect.current[v][i]) n++;
+      })
+    );
     const el = document.getElementById("blk-count");
     if (el) el.textContent = String(n).padStart(2, "0");
   };
 
-  const authorizeSector = (i: number) => {
-    if (!hasWork(i)) return; // seuls les secteurs bloqués se gèrent
-    authSect.current[i] = !authSect.current[i];
-    updateSectorDOM(i);
+  const authorizeSector = (v: number, i: number) => {
+    if (!workNow(v, i)) return; // seuls les secteurs bloqués se gèrent
+    authSect.current[v][i] = !authSect.current[v][i];
+    refreshSector(v, i);
     updateBlockedCount();
     addLog(
-      authSect.current[i]
-        ? `[AUTOR] ${SECT_V1[i].label} AUTORISÉ`
-        : `[AUTOR] ${SECT_V1[i].label} bloqué (${reasonOf(i)})`
+      authSect.current[v][i]
+        ? `[AUTOR] V${v} ${SECT_V1[i].label} AUTORISÉ`
+        : `[AUTOR] V${v} ${SECT_V1[i].label} bloqué (${reasonNow(v, i)})`
+    );
+  };
+
+  // L'admin sélectionne une voie + un secteur et le déclare (ou lève) en travaux
+  const declareTravaux = (v: number, i: number) => {
+    travauxRef.current[v][i] = !travauxRef.current[v][i];
+    if (!travauxRef.current[v][i]) authSect.current[v][i] = false; // remet l'autorisation à zéro
+    refreshSector(v, i);
+    updateBlockedCount();
+    const b = document.getElementById(`travbtn-${v}-${i}`);
+    if (b) {
+      b.textContent = travauxRef.current[v][i] ? "LEVER" : "DÉCLARER";
+      b.classList.toggle("bg-error", travauxRef.current[v][i]);
+      b.classList.toggle("text-on-error", travauxRef.current[v][i]);
+    }
+    lastStatus.current = "";
+    addLog(
+      travauxRef.current[v][i]
+        ? `[TRV] Travaux DÉCLARÉS — V${v} ${SECT_V1[i].label}`
+        : `[TRV] Travaux levés — V${v} ${SECT_V1[i].label}`
     );
   };
 
@@ -285,6 +354,7 @@ export default function Home() {
 
   // Klaxon d'alarme via Web Audio (deux tons)
   const playDanger = () => {
+    if (!soundEnabled.current) return; // son coupé par l'admin
     try {
       const w = window as Window & { webkitAudioContext?: typeof AudioContext };
       const Ctx = window.AudioContext || w.webkitAudioContext;
@@ -352,7 +422,7 @@ export default function Home() {
   const clearOcc = () => {
     if (!occActive.current) return;
     occActive.current = false;
-    updateSectorDOM(OCC_INDEX);
+    refreshSector(1, OCC_INDEX);
     updateBlockedCount();
     const m = document.getElementById("mat88");
     if (m) m.style.display = "none";
@@ -374,8 +444,27 @@ export default function Home() {
   const resetSimulation = () => {
     trainPK.current = CASA;
     trainVoie.current = 1;
+    dir.current = 1;
+    holdUntil.current = 0;
     crossRoute.current = null;
-    authSect.current = SECT_V1.map(() => false);
+    pendingRoute.current = null;
+    setAig(true);
+    armRef.current = "";
+    curSec.current = -1;
+    curVoie.current = 1;
+    travauxRef.current = { 1: SECT_V1.map((s) => !!s.travaux), 2: SECT_V2.map((s) => !!s.travaux) };
+    authSect.current = { 1: SECT_V1.map(() => false), 2: SECT_V2.map(() => false) };
+    [1, 2].forEach((v) =>
+      SECT_V1.forEach((_, i) => {
+        const b = document.getElementById(`travbtn-${v}-${i}`);
+        if (b) {
+          const on = travauxRef.current[v][i];
+          b.textContent = on ? "LEVER" : "DÉCLARER";
+          b.classList.toggle("bg-error", on);
+          b.classList.toggle("text-on-error", on);
+        }
+      })
+    );
     occActive.current = true;
     const m = document.getElementById("mat88");
     if (m) m.style.display = "";
@@ -390,7 +479,7 @@ export default function Home() {
     if (cv) cv.textContent = "1";
     const te = document.getElementById("train-ttx01");
     if (te) te.style.top = V1_Y + "px";
-    SECT_V1.forEach((_, i) => updateSectorDOM(i));
+    refreshAll();
     updateBlockedCount();
     startOccTimer();
     lastStatus.current = "";
@@ -414,53 +503,90 @@ export default function Home() {
     addLog(isPaused.current ? "[MOUV] Pause" : "[MOUV] Reprise");
   };
 
-  // Aiguillage rapide (bouton bas) : utilise le poste le plus proche, branche droite
+  // Aiguillage rapide (bouton bas) : poste le plus proche, point de la voie courante, branche droite
   const handleChangeVoie = () => {
     const j = nearestCrossPoste(trainPK.current);
     if (!j) {
-      addLog("[AIG] Changement impossible — train hors poste");
+      addLog("[AIG] Changement impossible — convoi hors poste");
       return;
     }
-    routeVoie(JUNCTIONS.indexOf(j), "R");
+    routeVoie(JUNCTIONS.indexOf(j), trainVoie.current, "R");
   };
 
-  // Arme/désarme visuellement les aiguilles du poste proche du train
+  // Son de l'alarme danger on/off
+  const toggleSound = () => {
+    soundEnabled.current = !soundEnabled.current;
+    const b = document.getElementById("sound-btn");
+    if (b) {
+      b.textContent = soundEnabled.current ? "🔊" : "🔇";
+      b.classList.toggle("text-secondary", soundEnabled.current);
+      b.classList.toggle("text-error", !soundEnabled.current);
+    }
+    if (soundEnabled.current) playDanger(); // bip de confirmation + débloque l'audio
+    addLog(soundEnabled.current ? "[SON] Alarme activée" : "[SON] Alarme coupée");
+  };
+
+  // Activation de l'aiguillage par l'admin (toutes les icônes deviennent cliquables)
+  const setAig = (on: boolean) => {
+    aigEnabled.current = on;
+    armRef.current = ""; // force le rafraîchissement des icônes
+    const b = document.getElementById("aig-btn");
+    if (b) {
+      b.textContent = on ? "🔀 AIGUILLAGE ON" : "🔀 AIGUILLAGE OFF";
+      b.classList.toggle("text-secondary", on);
+      b.classList.toggle("text-on-surface-variant", !on);
+    }
+    addLog(on ? "[ADMIN] Aiguillage ACTIVÉ" : "[ADMIN] Aiguillage désactivé");
+  };
+
+  // Arme les 2 icônes (gauche/droite) du point de la voie courante
   const armAiguillage = (idx: number) => {
-    if (idx === armRef.current) return;
-    armRef.current = idx;
+    const key = `${idx}|${aigEnabled.current ? 1 : 0}|${trainVoie.current}`;
+    if (key === armRef.current) return;
+    armRef.current = key;
+    const en = aigEnabled.current; // actives seulement si l'admin a activé
+    const v = trainVoie.current;
     JUNCTIONS.forEach((j, k) => {
       if (!j.cross) return;
-      const on = k === idx;
-      // ◣ gauche : simplement disponible quand armé
-      const bL = document.getElementById(`aig-${k}-L`);
-      if (bL) bL.classList.toggle("opacity-30", !on);
-      // ◢ droite : clignote et ressort (action recommandée)
-      const bR = document.getElementById(`aig-${k}-R`);
-      if (bR) {
-        bR.classList.toggle("opacity-30", !on);
-        bR.classList.toggle("blink-red", on);
-        bR.classList.toggle("bg-secondary", on);
-        bR.classList.toggle("text-on-secondary", on);
-        bR.classList.toggle("border-secondary", on);
-        bR.classList.toggle("scale-125", on);
-      }
-      // petit message "Changez la voie ici"
+      const near = k === idx;
+      (["1L", "1R", "2L", "2R"] as const).forEach((suf) => {
+        const b = document.getElementById(`aig-${k}-${suf}`);
+        if (!b) return;
+        const blink = en && near && Number(suf[0]) === v; // icône recommandée près du convoi
+        b.classList.toggle("opacity-30", !en); // estompées si aiguillage OFF
+        b.classList.toggle("blink-red", blink);
+        b.classList.toggle("bg-secondary", blink);
+        b.classList.toggle("text-on-secondary", blink);
+        b.classList.toggle("border-secondary", en);
+        b.classList.toggle("scale-125", blink);
+      });
       const lbl = document.getElementById(`aiglabel-${k}`);
-      if (lbl) lbl.classList.toggle("hidden", !on);
+      if (lbl) lbl.classList.toggle("hidden", !(en && near));
     });
   };
 
-  // Exécute la traversée diagonale au croisement (carL → carR)
+  // Exécute la traversée le long du bras du V — bidirectionnel (aller → / retour ←)
   const doCross = (idx: number, side: "L" | "R") => {
     const j = JUNCTIONS[idx];
-    const crossPk = side === "L" ? j.carL : j.carR;
+    const mid = (j.carL + j.carR) / 2; // apex du V (sur l'autre voie)
     const from = trainVoie.current;
     const to = from === 1 ? 2 : 1;
     trainVoie.current = to;
-    const startPK = Math.min(Math.max(trainPK.current, j.carL), j.carR - 0.3);
+    const d = dir.current;
+    let startPK: number, endPK: number;
+    if (from === 1) {
+      // V1 → V2 : descend depuis la position courante jusqu'à l'apex
+      startPK = trainPK.current;
+      endPK = mid;
+    } else {
+      // V2 → V1 : reste sur V2 jusqu'à l'apex puis monte vers le carré aval (sens de marche)
+      startPK = mid;
+      endPK = d > 0 ? j.carR : j.carL;
+    }
+    if (Math.abs(endPK - startPK) < 0.2) endPK = startPK + (endPK >= startPK ? 0.2 : -0.2);
     crossRoute.current = {
       startPK,
-      endPK: j.carR,
+      endPK,
       fromY: from === 1 ? V1_Y : V2_Y,
       toY: to === 1 ? V1_Y : V2_Y,
     };
@@ -468,37 +594,40 @@ export default function Home() {
     if (vv) vv.textContent = "V" + to;
     const cv = document.getElementById("card-voie");
     if (cv) cv.textContent = String(to);
+    // branche choisie en vert
     document.getElementById(`xl-${idx}`)?.setAttribute("stroke", side === "L" ? "#4ae176" : "#ef4444");
     document.getElementById(`xr-${idx}`)?.setAttribute("stroke", side === "R" ? "#4ae176" : "#ef4444");
     pendingRoute.current = null;
     lastStatus.current = "";
     addLog(
-      `[AIG] Poste ${j.top}/${j.bot} — bascule ${side === "L" ? "GAUCHE" : "DROITE"} (PK ${fmtPK(crossPk)}) — Voie ${from} → ${to}`
+      `[AIG] Poste ${j.top}/${j.bot} — Voie ${from} → ${to}, aiguille ${side === "L" ? "GAUCHE" : "DROITE"} (apex PK ${fmtPK(mid)})`
     );
   };
 
-  // Clic aiguille : bascule immédiate si au croisement, sinon ITINÉRAIRE TRACÉ (bascule au poste)
-  const routeVoie = (idx: number, side: "L" | "R") => {
-    const j = JUNCTIONS[idx];
-    const armed = armRef.current === idx;
-    const near = nearestCrossPoste(trainPK.current) === j;
-    if (!armed && !near) {
-      addLog(`[AIG] Poste ${j.top}: train trop loin pour aiguiller`);
+  // Clic sur une icône : fromVoie = voie du point, side = gauche/droite
+  const routeVoie = (idx: number, fromVoie: number, side: "L" | "R") => {
+    if (!aigEnabled.current) {
+      addLog("[AIG] Aiguillage désactivé — activez-le (bouton AIGUILLAGE)");
       return;
     }
-    if (trainPK.current >= j.carL - 1) {
-      doCross(idx, side); // déjà au croisement
+    if (trainVoie.current !== fromVoie) {
+      addLog(`[AIG] Point Voie ${fromVoie} inactif — convoi sur Voie ${trainVoie.current}`);
+      return;
+    }
+    const j = JUNCTIONS[idx];
+    if (trainPK.current >= j.carL && trainPK.current <= j.carR) {
+      doCross(idx, side); // déjà dans le croisement
     } else {
       pendingRoute.current = { idx, side };
-      const bR = document.getElementById(`aig-${idx}-R`);
-      if (bR && side === "R") {
-        bR.classList.remove("blink-red");
-        bR.classList.add("bg-secondary", "text-on-secondary");
+      const b = document.getElementById(`aig-${idx}-${fromVoie}${side}`);
+      if (b) {
+        b.classList.remove("blink-red");
+        b.classList.add("bg-secondary", "text-on-secondary");
       }
       const lbl = document.getElementById(`aiglabel-${idx}`);
-      if (lbl) lbl.textContent = `Itinéraire ◢ tracé ✓ (Poste ${j.top})`;
+      if (lbl) lbl.textContent = `Itinéraire tracé ✓ ${side === "L" ? "GAUCHE" : "DROITE"} (Poste ${j.top})`;
       lastStatus.current = "";
-      addLog(`[AIG] Itinéraire ${side === "L" ? "GAUCHE" : "DROITE"} tracé au Poste ${j.top} — bascule à l'arrivée`);
+      addLog(`[AIG] Itinéraire tracé Poste ${j.top} (Voie ${fromVoie} → ${fromVoie === 1 ? 2 : 1}, ${side === "L" ? "GAUCHE" : "DROITE"})`);
     }
   };
 
@@ -507,7 +636,7 @@ export default function Home() {
     const pkVal = document.getElementById("train-pk-val");
     const cardPk = document.getElementById("card-pk-ttx01");
     const scroller = document.getElementById("sector-scroll");
-    SECT_V1.forEach((_, i) => updateSectorDOM(i));
+    refreshAll();
     updateBlockedCount();
     startOccTimer();
 
@@ -522,8 +651,48 @@ export default function Home() {
     };
     scroller?.addEventListener("wheel", onWheel, { passive: false });
 
+    // Glisser-déposer pour défiler horizontalement (clic maintenu + déplacement)
+    let panning = false, panStartX = 0, panStartScroll = 0;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!scroller) return;
+      panning = true;
+      panStartX = e.clientX;
+      panStartScroll = scroller.scrollLeft;
+    };
+    const onPointerMove = (e: PointerEvent) => {
+      if (!panning || !scroller) return;
+      const dx = e.clientX - panStartX;
+      if (Math.abs(dx) > 3) {
+        if (autoFollow.current) setFollow(false);
+        scroller.scrollLeft = panStartScroll - dx;
+      }
+    };
+    const onPointerUp = () => {
+      panning = false;
+    };
+    scroller?.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+
     // PK → px live (lit le zoom courant via pxRef, pour la boucle d'animation)
     const pxAt = (pk: number) => (pk - MIN_PK) * pxRef.current + MARGIN;
+
+    // Position (x, y, angle) d'un point du convoi le long du tracé (V1 → bras du V → V2)
+    const pathPos = (pk: number) => {
+      let y = trainVoie.current === 1 ? V1_Y : V2_Y;
+      let ang = 0;
+      const c = crossRoute.current;
+      if (c && c.endPK !== c.startPK) {
+        // t borné 0..1 — fonctionne dans les deux sens (startPK > ou < endPK)
+        const t = Math.min(1, Math.max(0, (pk - c.startPK) / (c.endPK - c.startPK)));
+        y = c.fromY + (c.toY - c.fromY) * t;
+        if (t > 0 && t < 1) {
+          const dx = Math.abs((c.endPK - c.startPK) * pxRef.current);
+          ang = (Math.atan2(c.toY - c.fromY, dx) * 180) / Math.PI;
+        }
+      }
+      return { x: pxAt(pk), y, ang };
+    };
 
     const clockId = setInterval(() => {
       const now = new Date();
@@ -532,116 +701,181 @@ export default function Home() {
     }, 1000);
 
     // Bloquant seulement sur la voie 1 (sur voie 2 / contre-voie, libre)
-    const isBlocked = (i: number) =>
-      trainVoie.current === 1 &&
-      (!!SECT_V1[i].travaux || (i === OCC_INDEX && occActive.current)) &&
-      !authSect.current[i];
+    const isBlocked = (i: number) => {
+      const v = trainVoie.current;
+      return workNow(v, i) && !authSect.current[v][i];
+    };
 
     let raf = 0;
     const animate = () => {
       if (!isPaused.current) {
-        if (trainPK.current >= MARRAKECH - 0.02) trainPK.current = CASA;
+        // Aller-retour sur la Voie 1 : demi-tour aux terminus
+        if (dir.current > 0 && trainPK.current >= MARRAKECH - 0.02) {
+          trainPK.current = MARRAKECH;
+          dir.current = -1;
+          holdUntil.current = Date.now() + 1500;
+          lastStatus.current = "";
+          addLog(`[MOUV] Arrivée MARRAKECH — demi-tour (Voie ${trainVoie.current})`);
+        } else if (dir.current < 0 && trainPK.current <= CASA + 0.02) {
+          trainPK.current = CASA;
+          dir.current = 1;
+          holdUntil.current = Date.now() + 1500;
+          lastStatus.current = "";
+          addLog(`[MOUV] Arrivée CASABLANCA — repart (Voie ${trainVoie.current})`);
+        }
 
-        // Borne d'avance = entrée du 1er secteur bloqué devant le train
-        let allowedMax = MARRAKECH;
+        const holding = Date.now() < holdUntil.current;
+        const prevPK = trainPK.current;
+
+        // Secteur bloqué le plus proche dans le sens de marche (mêmes conditions aller ET retour)
+        const blockEntry = (i: number) =>
+          dir.current > 0
+            ? junctionBefore(i)?.carL ?? SECT_V1[i].a
+            : junctionAt(SECT_V1[i].b)?.carR ?? SECT_V1[i].b;
         let stopIdx = -1;
+        let bound = dir.current > 0 ? MARRAKECH : CASA;
         for (let i = 0; i < SECT_V1.length; i++) {
           if (!isBlocked(i)) continue;
-          // arrêt à l'entrée du croisement (carré gauche du poste protecteur)
-          const stopPk = junctionBefore(i)?.carL ?? SECT_V1[i].a;
-          if (stopPk >= trainPK.current - 0.001 && stopPk < allowedMax) {
-            allowedMax = stopPk;
+          const e = blockEntry(i);
+          if (
+            dir.current > 0
+              ? e >= trainPK.current - 0.001 && e < bound
+              : e <= trainPK.current + 0.001 && e > bound
+          ) {
+            bound = e;
             stopIdx = i;
           }
         }
+        if (!holding) {
+          const delta = speed.current / 800;
+          trainPK.current =
+            dir.current > 0
+              ? Math.min(trainPK.current + delta, bound)
+              : Math.max(trainPK.current - delta, bound);
+        }
+        const moving = Math.abs(trainPK.current - prevPK) > 1e-6;
+        const dStop = stopIdx >= 0 ? Math.abs(bound - trainPK.current) : Infinity;
 
-        const newPk = Math.min(trainPK.current + speed.current / 800, allowedMax);
-        const moving = newPk > trainPK.current + 1e-6;
-        trainPK.current = newPk;
+        // Couleur de la ligne : secteur courant en bleu (occupé), secteur quitté en orange
+        const curVoieSectors = trainVoie.current === 1 ? SECT_V1 : SECT_V2;
+        const cs = curVoieSectors.findIndex(
+          (s) => trainPK.current >= s.a && trainPK.current <= s.b
+        );
+        if (cs !== curSec.current || trainVoie.current !== curVoie.current) {
+          if (curSec.current >= 0) paintSeg(curVoie.current, curSec.current); // secteur quitté → libre (bleu)
+          curVoie.current = trainVoie.current;
+          curSec.current = cs;
+        }
+        // Traînée orange progressive : la partie déjà parcourue du secteur courant
+        const trail = document.getElementById("cur-trail") as HTMLElement | null;
+        if (trail) {
+          const sct = trainVoie.current === 1 ? SECT_V1 : SECT_V2;
+          const s = curSec.current >= 0 ? sct[curSec.current] : null;
+          if (s) {
+            const a = dir.current > 0 ? s.a : trainPK.current;
+            const b = dir.current > 0 ? trainPK.current : s.b;
+            const w = Math.abs(pxAt(b) - pxAt(a));
+            trail.style.left = pxAt(Math.min(a, b)) + "px";
+            trail.style.width = w + "px";
+            trail.style.top = (trainVoie.current === 1 ? V1_Y : V2_Y) + "px";
+            trail.style.display = w > 0.5 ? "block" : "none";
+          } else {
+            trail.style.display = "none";
+          }
+        }
+        const blockJ =
+          stopIdx >= 0
+            ? dir.current > 0
+              ? junctionBefore(stopIdx)
+              : junctionAt(SECT_V1[stopIdx].b)
+            : undefined;
 
         // Itinéraire tracé : bascule automatique à l'arrivée au croisement
         if (pendingRoute.current) {
           const pj = JUNCTIONS[pendingRoute.current.idx];
-          if (trainPK.current >= pj.carL - 1)
+          if (trainPK.current >= pj.carL && trainPK.current <= pj.carR)
             doCross(pendingRoute.current.idx, pendingRoute.current.side);
         }
         let armIdx = -1;
 
+        // Convoi articulé : chaque segment suit le tracé (les wagons suivent la tête)
+        const cr = crossRoute.current;
+        if (cr) {
+          const tail = (NSEG - 1) * WAGON_LEN;
+          const done =
+            cr.endPK >= cr.startPK
+              ? trainPK.current > cr.endPK + tail
+              : trainPK.current < cr.endPK - tail;
+          if (done) crossRoute.current = null; // traversée terminée pour tout le convoi
+        }
+        for (let k = 0; k < NSEG; k++) {
+          const seg = document.getElementById(`tseg-${k}`);
+          if (!seg) continue;
+          const segPk = Math.min(MARRAKECH, Math.max(MIN_PK, trainPK.current - dir.current * k * WAGON_LEN));
+          const p = pathPos(segPk);
+          seg.style.left = p.x + "px";
+          seg.style.top = p.y + "px";
+          seg.style.transform = `translate(-50%,-50%) rotate(${p.ang}deg)`;
+        }
+        const head = pathPos(trainPK.current);
         if (trainEl) {
-          trainEl.style.left = pxAt(trainPK.current) + "px";
-          // top : diagonale pendant la traversée du croisement, sinon voie courante
-          let topY = trainVoie.current === 1 ? V1_Y : V2_Y;
-          const cr = crossRoute.current;
-          if (cr) {
-            if (trainPK.current <= cr.endPK) {
-              const t = Math.min(1, Math.max(0, (trainPK.current - cr.startPK) / (cr.endPK - cr.startPK)));
-              topY = cr.fromY + (cr.toY - cr.fromY) * t;
-            } else {
-              crossRoute.current = null; // traversée terminée
-            }
-          }
-          trainEl.style.top = topY + "px";
+          trainEl.style.left = head.x + "px";
+          trainEl.style.top = head.y + "px";
         }
         if (autoFollow.current && scroller)
-          scroller.scrollLeft = pxAt(trainPK.current) - scroller.clientWidth / 2;
+          scroller.scrollLeft = head.x - scroller.clientWidth / 2;
         const lbl = "PK " + fmtPK(trainPK.current);
         if (pkVal) pkVal.textContent = lbl;
         if (cardPk) cardPk.textContent = lbl;
 
-        if (!moving && stopIdx >= 0) {
-          // Arrêt au poste avant le secteur bloqué
-          const n = posteBefore(stopIdx) ?? "?";
+        if (holding) {
+          setTrainStatus("move:⏸ DEMI-TOUR au terminus");
+          pushAlerts("hold", []);
+          stopAlarm();
+        } else if (trainVoie.current === 2) {
+          // dévié sur la Voie 2 (libre) pour contourner un secteur
+          setTrainStatus(
+            dir.current < 0 ? "move:Voie 2 ← — déviation (retour)" : "move:Voie 2 → — déviation"
+          );
+          pushAlerts("v2", [{ text: `↪ Voie 2 — secteur contourné`, tone: "ok" }]);
+          stopAlarm();
+        } else if (stopIdx >= 0 && !moving) {
+          // Arrêt au poste avant le secteur bloqué (aller comme retour)
+          const n = blockJ ? blockJ.top : "?";
           setTrainStatus(
             `stop:Poste ${n} — ${SECT_V1[stopIdx].label} ${motifText(stopIdx)} — CHANGER DE VOIE`
           );
           pushAlerts(`stop-${stopIdx}`, [
             { text: `⛔ ARRÊT — Poste ${n} : ${SECT_V1[stopIdx].label} ${motifText(stopIdx)}`, tone: "danger" },
-            { text: `👉 Cliquez ◢ DROITE (ou ◣ GAUCHE) au Poste ${n} pour changer de voie`, tone: "danger" },
+            { text: `👉 Cliquez une aiguille (L/R) au Poste ${n} pour basculer en Voie 2`, tone: "danger" },
             { text: `… ou attendez la libération du secteur`, tone: "warn" },
           ]);
           startAlarm();
-          armIdx = JUNCTIONS.findIndex((jj) => jj === junctionBefore(stopIdx));
-        } else if (trainVoie.current === 1) {
-          // Zone d'attention de 60 km avant un secteur bloqué
-          let appr = -1;
-          let stopPk = 0;
-          for (let i = 0; i < SECT_V1.length; i++) {
-            if (!isBlocked(i)) continue;
-            const sp = junctionBefore(i)?.carL ?? SECT_V1[i].a;
-            if (trainPK.current >= sp - SECTOR_KM && trainPK.current < sp) {
-              appr = i;
-              stopPk = sp;
-              break;
-            }
-          }
-          if (appr >= 0) {
-            const n = posteBefore(appr) ?? "?";
-            const d = Math.max(0, stopPk - trainPK.current);
-            const soundOn = d <= HALF_KM; // son au 1/2 de la zone (30 km)
-            setTrainStatus(
-              `appr:${SECT_V1[appr].label} ${motifText(appr)} — basculez Voie 2 (◢ Poste ${n}) pour ne pas stopper`
-            );
-            const cards: { text: string; tone: "danger" | "warn" | "ok" }[] = [
-              { text: `🚨 DANGER — secteur suivant ${SECT_V1[appr].label} ${motifText(appr)}`, tone: "danger" },
-              { text: `⚠️ ATTENTION — arrêt dans ${d.toFixed(0)} km si rien n'est fait`, tone: "warn" },
-              { text: `👉 Cliquez ◢ DROITE au Poste ${n} → Voie 2 (évite l'arrêt)`, tone: "warn" },
-            ];
-            if (soundOn) cards.push({ text: `🔊 ALARME — mi-distance : basculez MAINTENANT`, tone: "danger" });
-            pushAlerts(`appr-${appr}-${Math.ceil(d)}`, cards);
-            if (soundOn) startAlarm();
-            else stopAlarm();
-            // arme le poste du secteur bloqué dès l'entrée du secteur actif
-            armIdx = JUNCTIONS.findIndex((jj) => jj === junctionBefore(appr));
-          } else {
-            setTrainStatus("move:Voie 1 — circulation normale");
-            pushAlerts("clear1", []);
-            stopAlarm();
-          }
+          armIdx = blockJ ? JUNCTIONS.indexOf(blockJ) : -1;
+        } else if (stopIdx >= 0 && dStop <= SECTOR_KM) {
+          // Zone d'attention de 60 km avant le secteur bloqué (dans le sens de marche)
+          const n = blockJ ? blockJ.top : "?";
+          const soundOn = dStop <= HALF_KM; // son au 1/2 de la zone (30 km)
+          setTrainStatus(
+            `appr:${SECT_V1[stopIdx].label} ${motifText(stopIdx)} — changez de voie (Poste ${n}) pour ne pas stopper`
+          );
+          const cards: { text: string; tone: "danger" | "warn" | "ok" }[] = [
+            { text: `🚨 DANGER — ${SECT_V1[stopIdx].label} ${motifText(stopIdx)}`, tone: "danger" },
+            { text: `⚠️ ATTENTION — arrêt dans ${dStop.toFixed(0)} km si rien n'est fait`, tone: "warn" },
+            { text: `👉 Aiguille L/R au Poste ${n} → Voie 2 (évite l'arrêt)`, tone: "warn" },
+          ];
+          if (soundOn) cards.push({ text: `🔊 ALARME — basculez MAINTENANT`, tone: "danger" });
+          pushAlerts(`appr-${stopIdx}-${Math.ceil(dStop)}`, cards);
+          if (soundOn) startAlarm();
+          else stopAlarm();
+          armIdx = blockJ ? JUNCTIONS.indexOf(blockJ) : -1;
         } else {
-          setTrainStatus("move:Voie 2 (contre-voie) — circulation normale");
-          pushAlerts("cross-ok", [
-            { text: `✔ Voie 2 (contre-voie) — secteur contourné`, tone: "ok" },
-          ]);
+          setTrainStatus(
+            dir.current > 0
+              ? "move:Voie 1 → — aller vers MARRAKECH"
+              : "move:Voie 1 ← — retour vers CASABLANCA"
+          );
+          pushAlerts(dir.current > 0 ? "clear-a" : "clear-r", []);
           stopAlarm();
         }
 
@@ -662,6 +896,9 @@ export default function Home() {
       if (occTimer.current) clearTimeout(occTimer.current);
       stopAlarm();
       scroller?.removeEventListener("wheel", onWheel);
+      scroller?.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
     };
   }, []);
 
@@ -740,8 +977,9 @@ export default function Home() {
           <div className="p-unit-2 border-b border-outline-variant bg-surface-container-highest/20"><span className="font-label-bold text-[10px] text-primary block uppercase tracking-widest">Legend</span></div>
           <div className="p-unit-2 flex flex-col gap-unit-1 text-[10px] text-on-surface-variant font-telemetry">
             <div className="flex items-center gap-unit-2"><span className="w-4 h-[2px] bg-[#5b8db8]"></span> Voie</div>
-            <div className="flex items-center gap-unit-2"><span className="w-4 h-[3px] bg-red-600/80"></span> Secteur bloqué</div>
+            <div className="flex items-center gap-unit-2"><span className="w-4 h-[3px] bg-red-600/80"></span> Secteur occupé</div>
             <div className="flex items-center gap-unit-2"><span className="w-4 h-[3px] bg-secondary/80"></span> Secteur autorisé</div>
+            <div className="flex items-center gap-unit-2"><span className="w-4 h-[3px] bg-amber-500/80"></span> Secteur en cours</div>
             <div className="flex items-center gap-unit-2"><span className="w-3 h-3 bg-black border border-white/80 flex items-center justify-center text-[6px] text-white font-bold">P</span> Poste</div>
             <div className="flex items-center gap-unit-2"><span className="w-3 h-[2px] bg-red-500 rotate-45"></span> Communication</div>
           </div>
@@ -751,7 +989,7 @@ export default function Home() {
               <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">add_circle</span>
               <span className="text-[9px] mt-1 font-label-bold text-on-surface-variant">AJOUTER TRAIN</span>
             </button>
-            <button className="flex flex-col items-center justify-center py-unit-3 border-b border-outline-variant hover:bg-surface-variant transition-colors group">
+            <button className="flex flex-col items-center justify-center py-unit-3 border-b border-outline-variant hover:bg-surface-variant transition-colors group" onClick={() => toggleModal("travaux-modal")}>
               <span className="material-symbols-outlined text-on-surface-variant group-hover:text-primary">construction</span>
               <span className="text-[9px] mt-1 font-label-bold text-on-surface-variant">ZONES TRAVAUX</span>
             </button>
@@ -780,8 +1018,9 @@ export default function Home() {
           <div className="absolute top-2 left-2 z-40 flex flex-col gap-1">
             <button onClick={() => applyZoom(1.3)} title="Zoom avant" className="w-6 h-6 bg-surface-container border border-outline-variant text-on-surface text-[16px] leading-none font-bold hover:bg-surface-variant hover:text-primary">+</button>
             <button onClick={() => applyZoom(1 / 1.3)} title="Zoom arrière" className="w-6 h-6 bg-surface-container border border-outline-variant text-on-surface text-[16px] leading-none font-bold hover:bg-surface-variant hover:text-primary">−</button>
+            <button id="sound-btn" onClick={toggleSound} title="Son de l'alarme danger on/off" className="w-6 h-6 bg-surface-container border border-outline-variant text-secondary text-[13px] leading-none hover:bg-surface-variant">🔊</button>
           </div>
-          <div className="absolute inset-0 overflow-x-auto overflow-y-auto custom-scrollbar" id="sector-scroll">
+          <div className="absolute inset-0 overflow-x-auto overflow-y-auto custom-scrollbar cursor-grab active:cursor-grabbing" id="sector-scroll">
             <div className="relative" style={{ width: TRACK_WIDTH, height: 380 }}>
               <span className="absolute font-display-md text-[13px] font-bold text-error -translate-y-1/2" style={{ left: 6, top: (V1_Y + V2_Y) / 2 }}>CASABLANCA</span>
               <span className="absolute font-display-md text-[13px] font-bold text-error -translate-y-1/2 -translate-x-full whitespace-nowrap" style={{ left: TRACK_WIDTH - 6, top: (V1_Y + V2_Y) / 2 }}>MARRAKECH</span>
@@ -822,26 +1061,29 @@ export default function Home() {
                 const x = pkToPx(s.a), w = pkToPx(s.b) - x;
                 return (
                   <span key={`v1-${i}`}>
-                    {hasWork(i) && (
-                      <div
-                        id={`seg-${i}`}
-                        onClick={() => authorizeSector(i)}
-                        title={`${s.label} — ${st.state}`}
-                        className={SEG_BASE + (st.blocked ? "bg-red-600/80 blink-red" : "bg-secondary/80")}
-                        style={{ left: x, width: w, top: V1_Y }}
-                      />
-                    )}
+                    <div
+                      id={`seg-1-${i}`}
+                      onClick={() => authorizeSector(1, i)}
+                      title={`${s.label} V1 — ${st.state}`}
+                      className={SEG_BASE + (st.blocked ? "bg-red-600/80 blink-red" : "bg-transparent")}
+                      style={{ left: x, width: w, top: V1_Y }}
+                    />
                     <div className="absolute" style={{ left: x, width: w, top: V1_Y + 18 }}>
                       <div className={`h-px w-full ${st.blocked ? "bg-error/40" : "bg-secondary/40"}`} />
-                      <span id={`seclabel-${i}`} className={SECLABEL_BASE + (st.blocked ? "text-error" : st.work && st.auth ? "text-secondary" : "text-on-surface-variant")}>
+                      <span id={`seclabel-1-${i}`} className={SECLABEL_BASE + (st.blocked ? "text-error" : st.work && st.auth ? "text-secondary" : "text-on-surface-variant")}>
                         {`${s.label} · ${distOf(i)}${hasWork(i) ? " · " + st.state : ""}`}
                       </span>
                     </div>
                   </span>
                 );
               })}
-              {/* Secteurs Voie 2 */}
-              {SECT_V2.map((s) => (<SectorBarV2 key={s.label} s={s} y={V2_Y - 14} />))}
+              {/* Secteurs Voie 2 — couleur de ligne + label */}
+              {SECT_V2.map((s, i) => (
+                <span key={`v2-${i}`}>
+                  <div id={`seg-2-${i}`} onClick={() => authorizeSector(2, i)} title={`${s.label} V2`} className={SEG_BASE + "bg-transparent"} style={{ left: pkToPx(s.a), width: pkToPx(s.b) - pkToPx(s.a), top: V2_Y }} />
+                  <SectorBarV2 s={s} y={V2_Y - 14} />
+                </span>
+              ))}
 
               {/* Postes + signalisation */}
               {JUNCTIONS.map((j, ji) => (
@@ -870,12 +1112,21 @@ export default function Home() {
                     <span key={`pk-${j.top}-${k}`} className="absolute text-[8px] font-telemetry text-on-surface whitespace-nowrap -translate-x-1/2 z-20" style={{ left: pkToPx(p), top: (V1_Y + V2_Y) / 2 + (k % 2 ? 8 : -4) }}>{fmtPK(p)}</span>
                   ))}
 
-                  {/* Aiguille du poste : GAUCHE / DROITE (s'arme quand le train est proche) */}
+                  {/* 2 points (Voie 1 aller / Voie 2 arrivée), chacun 2 icônes : gauche ↙↖ et droite ↘↗ */}
                   {j.cross && (
                     <>
-                      <button id={`aig-${ji}-L`} onClick={() => routeVoie(ji, "L")} title={`Aiguille GAUCHE — Poste ${j.top} (PK ${fmtPK(j.carL)})`} className="absolute -translate-x-1/2 -translate-y-1/2 z-30 w-4 h-4 flex items-center justify-center text-[10px] bg-surface-container-highest border border-outline-variant text-on-surface-variant hover:text-secondary opacity-30" style={{ left: pkToPx(j.carL), top: (V1_Y + V2_Y) / 2 + 22 }}>◣</button>
-                      <button id={`aig-${ji}-R`} onClick={() => routeVoie(ji, "R")} title={`Aiguille DROITE — Poste ${j.top} (PK ${fmtPK(j.carR)})`} className="absolute -translate-x-1/2 -translate-y-1/2 z-30 w-4 h-4 flex items-center justify-center text-[10px] bg-surface-container-highest border border-outline-variant text-on-surface-variant hover:text-secondary opacity-30" style={{ left: pkToPx(j.carR), top: (V1_Y + V2_Y) / 2 + 22 }}>◢</button>
-                      <div id={`aiglabel-${ji}`} className="absolute -translate-x-1/2 z-30 hidden text-[9px] font-label-bold text-secondary blink-red whitespace-nowrap pointer-events-none bg-surface-container px-1 border border-secondary" style={{ left: pkToPx(j.carR), top: (V1_Y + V2_Y) / 2 + 4 }}>Changez la voie ici ↧</div>
+                      {/* Point Voie 1 (→) : 2 aiguilles */}
+                      <button id={`aig-${ji}-1L`} onClick={() => routeVoie(ji, 1, "L")} title={`Voie 1 — aiguille GAUCHE — Poste ${j.top}`} className="absolute -translate-x-1/2 -translate-y-1/2 z-30 w-4 h-4 flex items-center justify-center text-[11px] leading-none bg-surface-container-highest border border-outline-variant text-on-surface-variant hover:text-secondary opacity-30" style={{ left: pkToPx((j.carL + j.carR) / 2 - 1.2), top: V1_Y }}>↙</button>
+                      <button id={`aig-${ji}-1R`} onClick={() => routeVoie(ji, 1, "R")} title={`Voie 1 — aiguille DROITE — Poste ${j.top}`} className="absolute -translate-x-1/2 -translate-y-1/2 z-30 w-4 h-4 flex items-center justify-center text-[11px] leading-none bg-surface-container-highest border border-outline-variant text-on-surface-variant hover:text-secondary opacity-30" style={{ left: pkToPx((j.carL + j.carR) / 2 + 1.2), top: V1_Y }}>↘</button>
+                      {/* Point Voie 2 (←) : 2 aiguilles */}
+                      <button id={`aig-${ji}-2L`} onClick={() => routeVoie(ji, 2, "L")} title={`Voie 2 — aiguille GAUCHE — Poste ${j.top}`} className="absolute -translate-x-1/2 -translate-y-1/2 z-30 w-4 h-4 flex items-center justify-center text-[11px] leading-none bg-surface-container-highest border border-outline-variant text-on-surface-variant hover:text-secondary opacity-30" style={{ left: pkToPx((j.carL + j.carR) / 2 - 1.2), top: V2_Y }}>↖</button>
+                      <button id={`aig-${ji}-2R`} onClick={() => routeVoie(ji, 2, "R")} title={`Voie 2 — aiguille DROITE — Poste ${j.top}`} className="absolute -translate-x-1/2 -translate-y-1/2 z-30 w-4 h-4 flex items-center justify-center text-[11px] leading-none bg-surface-container-highest border border-outline-variant text-on-surface-variant hover:text-secondary opacity-30" style={{ left: pkToPx((j.carL + j.carR) / 2 + 1.2), top: V2_Y }}>↗</button>
+                      {/* Labels L / R au-dessus de chaque icône */}
+                      <span className="absolute -translate-x-1/2 z-30 text-[7px] font-bold text-primary pointer-events-none" style={{ left: pkToPx((j.carL + j.carR) / 2 - 1.2), top: V1_Y - 11 }}>L</span>
+                      <span className="absolute -translate-x-1/2 z-30 text-[7px] font-bold text-primary pointer-events-none" style={{ left: pkToPx((j.carL + j.carR) / 2 + 1.2), top: V1_Y - 11 }}>R</span>
+                      <span className="absolute -translate-x-1/2 z-30 text-[7px] font-bold text-primary pointer-events-none" style={{ left: pkToPx((j.carL + j.carR) / 2 - 1.2), top: V2_Y - 11 }}>L</span>
+                      <span className="absolute -translate-x-1/2 z-30 text-[7px] font-bold text-primary pointer-events-none" style={{ left: pkToPx((j.carL + j.carR) / 2 + 1.2), top: V2_Y - 11 }}>R</span>
+                      <div id={`aiglabel-${ji}`} className="absolute -translate-x-1/2 z-30 hidden text-[9px] font-label-bold text-secondary blink-red whitespace-nowrap pointer-events-none bg-surface-container px-1 border border-secondary" style={{ left: pkToPx((j.carL + j.carR) / 2), top: (V1_Y + V2_Y) / 2 }}>Aiguillez ici (L / R)</div>
                     </>
                   )}
                 </span>
@@ -890,20 +1141,30 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Train TTx-01 (Voie 1) */}
-              <div className="absolute -translate-y-1/2 z-30 flex items-center group cursor-pointer" id="train-ttx01" style={{ left: pkToPx(CASA), top: V1_Y, transition: "left 0.1s linear, top 0.12s linear" }}>
-                <div className="flex flex-col items-center -mt-12 mr-2">
-                  <div className="bg-surface-container-highest px-1 border border-outline-variant text-[9px] font-telemetry whitespace-nowrap"><span className="text-primary">TTx-01</span> <span id="train-voie-val" className="text-secondary">V1</span> | <span id="train-speed-val">40km/h</span></div>
-                  <div className="text-[8px] text-on-surface-variant opacity-60 whitespace-nowrap" id="train-pk-val">PK {fmtPK(CASA)}</div>
-                </div>
-                <div className="flex items-center">
-                  <div className="w-3 h-3 bg-red-600 rounded-full shadow-[0_0_5px_red]"></div>
-                  <div className="w-12 h-3 bg-sky-600/80 border-y border-sky-400 mx-px"></div>
-                  <div className="w-8 h-3 bg-sky-600/80 border-y border-sky-400 mx-px"></div>
-                  <div className="w-3 h-3 bg-sky-500"></div>
-                  <div className="w-3 h-3 bg-secondary rounded-full gps-pulse ml-2"></div>
-                </div>
+              {/* Traînée orange progressive (partie parcourue du secteur courant) */}
+              <div id="cur-trail" className="absolute h-[3px] -translate-y-1/2 z-20 pointer-events-none" style={{ left: pkToPx(CASA), width: 0, top: V1_Y, background: "rgba(245,158,11,0.9)", display: "none" }} />
+
+              {/* Étiquette du convoi (suit la tête, reste droite) */}
+              <div id="train-ttx01" className="absolute z-30 flex flex-col items-center pointer-events-none" style={{ left: pkToPx(CASA), top: V1_Y, transform: "translate(-50%, -150%)", transition: "left 0.1s linear, top 0.12s linear" }}>
+                <div className="bg-surface-container-highest px-1 border border-outline-variant text-[9px] font-telemetry whitespace-nowrap"><span className="text-primary">TTx-01</span> <span id="train-voie-val" className="text-secondary">V1</span> | <span id="train-speed-val">40km/h</span></div>
+                <div className="text-[8px] text-on-surface-variant opacity-60 whitespace-nowrap" id="train-pk-val">PK {fmtPK(CASA)}</div>
               </div>
+              {/* Convoi articulé : tête (k=0) → wagons → queue (k=NSEG-1) */}
+              {Array.from({ length: NSEG }, (_, k) => (
+                <div
+                  key={`tseg-${k}`}
+                  id={`tseg-${k}`}
+                  className={
+                    "absolute z-30 " +
+                    (k === 0
+                      ? "w-4 h-3 bg-sky-500 gps-pulse"
+                      : k === NSEG - 1
+                      ? "w-3 h-3 bg-red-600 rounded-full shadow-[0_0_5px_red]"
+                      : "w-3 h-3 bg-sky-600/80 border-y border-sky-400")
+                  }
+                  style={{ left: pkToPx(CASA), top: V1_Y, transform: "translate(-50%,-50%)", transition: "left 0.1s linear, top 0.12s linear, transform 0.12s linear" }}
+                />
+              ))}
             </div>
           </div>
         </main>
@@ -949,6 +1210,7 @@ export default function Home() {
           <div className="flex items-center gap-unit-3"><span className="text-[9px] font-label-bold text-on-surface-variant">T1 SPD</span><input className="w-24" id="speed-slider" max="120" min="0" type="range" defaultValue="40" onChange={handleSlider} /></div>
           <div className="h-4 w-px bg-outline-variant"></div>
           <button className="px-2 h-5 bg-secondary-container text-on-secondary-container border border-outline-variant text-[9px] font-label-bold hover:opacity-90 transition" onClick={() => toggleModal("auth-modal")}>AUTORISATIONS ▸</button>
+          <button id="aig-btn" className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold text-secondary hover:opacity-90 transition" onClick={() => setAig(!aigEnabled.current)} title="ADMIN : activer/désactiver l'aiguillage (rend les icônes cliquables)">🔀 AIGUILLAGE ON</button>
           <button id="voie-btn" className="px-2 h-5 bg-primary-container text-on-primary-container border border-outline-variant text-[9px] font-label-bold hover:opacity-90 transition opacity-40" onClick={handleChangeVoie} title="Aiguillage : changer la voie du train au poste le plus proche">⇄ CHANGER VOIE</button>
           <button id="follow-btn" className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold text-secondary hover:opacity-90 transition" onClick={() => setFollow(!autoFollow.current)} title="Recentrage automatique sur le train (la molette le met en pause)">⊙ SUIVI ON</button>
           <div className="flex gap-unit-2">
@@ -963,31 +1225,56 @@ export default function Home() {
       <div className="fixed inset-0 z-[100] bg-background/80 backdrop-blur-sm hidden items-center justify-center" id="auth-modal">
         <div className="bg-[#0d1e30] border border-outline-variant w-[520px] max-h-[80vh] flex flex-col p-unit-6 shadow-2xl">
           <div className="flex justify-between items-center mb-unit-4 border-b border-outline-variant pb-2">
-            <h3 className="text-primary font-display-md text-[16px]">AUTORISATIONS — VOIE 1</h3>
+            <h3 className="text-primary font-display-md text-[16px]">AUTORISATIONS — VOIES 1 &amp; 2</h3>
             <button className="material-symbols-outlined text-on-surface-variant hover:text-error" onClick={() => toggleModal("auth-modal")}>close</button>
           </div>
           <div className="overflow-y-auto custom-scrollbar space-y-unit-2">
-            {SECT_V1.map((s, i) => {
-              const st = sectorState(i, false);
-              return (
-                <div key={`auth-${i}`} className="flex items-center justify-between gap-unit-2 border-b border-outline-variant/30 pb-1">
-                  <div className="flex flex-col">
-                    <span className="text-[11px] font-label-bold text-on-surface">{s.label}</span>
-                    <span className="text-[9px] font-telemetry text-on-surface-variant">{fmtPK(s.a)} → {fmtPK(s.b)} · {distOf(i)}</span>
-                  </div>
-                  <div className="flex items-center gap-unit-2">
-                    <span id={`secbadge-${i}`} className={"text-[9px] font-label-bold px-1 " + (st.blocked ? "bg-red-600 text-white" : "bg-secondary/15 text-secondary")}>{st.state}</span>
-                    {hasWork(i) ? (
-                      <button id={`secbtn-${i}`} className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold hover:bg-secondary hover:text-on-secondary transition-colors" onClick={() => authorizeSector(i)}>{st.auth ? "RETIRER" : "AUTORISER"}</button>
-                    ) : (
-                      <span className="text-[9px] text-on-surface-variant/50 px-2">—</span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            {[1, 2].map((v) => (
+              <div key={`authv-${v}`}>
+                <div className="text-[10px] font-label-bold text-primary mt-1 mb-1 border-b border-outline-variant/40">VOIE {v}</div>
+                {SECT_V1.map((s, i) => {
+                  const w0 = v === 1 && (!!s.travaux || i === OCC_INDEX);
+                  return (
+                    <div key={`auth-${v}-${i}`} className="flex items-center justify-between gap-unit-2 border-b border-outline-variant/20 pb-1">
+                      <span className="text-[11px] font-label-bold text-on-surface">{s.label}</span>
+                      <div className="flex items-center gap-unit-2">
+                        <span id={`secbadge-${v}-${i}`} className={"text-[9px] font-label-bold px-1 " + (w0 ? "bg-red-600 text-white" : "bg-secondary/15 text-secondary")}>{w0 ? (v === 1 && i === OCC_INDEX ? "OCCUPÉ MAT-88" : "TRAVAUX") : "LIBRE"}</span>
+                        <button id={`secbtn-${v}-${i}`} className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold hover:bg-secondary hover:text-on-secondary transition-colors" onClick={() => authorizeSector(v, i)}>AUTORISER</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
           </div>
-          <p className="text-[9px] font-telemetry text-on-surface-variant/60 mt-unit-3">Un secteur est bloqué (rouge) s'il y a des travaux (ZT) ou un autre train. Le train TTx-01 s'arrête à son entrée tant qu'il n'est pas autorisé.</p>
+          <p className="text-[9px] font-telemetry text-on-surface-variant/60 mt-unit-3">{"Autorise un secteur bloqué (rouge) sur l'une ou l'autre voie. On peut aussi cliquer directement le tronçon rouge sur la carte."}</p>
+        </div>
+      </div>
+
+      {/* Modal ZONES TRAVAUX — déclarer un secteur en travaux */}
+      <div className="fixed inset-0 z-[100] bg-background/80 backdrop-blur-sm hidden items-center justify-center" id="travaux-modal">
+        <div className="bg-[#0d1e30] border border-outline-variant w-[520px] max-h-[80vh] flex flex-col p-unit-6 shadow-2xl">
+          <div className="flex justify-between items-center mb-unit-4 border-b border-outline-variant pb-2">
+            <h3 className="text-primary font-display-md text-[16px]">ZONES TRAVAUX — VOIES 1 &amp; 2</h3>
+            <button className="material-symbols-outlined text-on-surface-variant hover:text-error" onClick={() => toggleModal("travaux-modal")}>close</button>
+          </div>
+          <div className="overflow-y-auto custom-scrollbar space-y-unit-2">
+            {[1, 2].map((v) => (
+              <div key={`trvv-${v}`}>
+                <div className="text-[10px] font-label-bold text-primary mt-1 mb-1 border-b border-outline-variant/40">VOIE {v}</div>
+                {SECT_V1.map((s, i) => {
+                  const on = v === 1 && !!s.travaux;
+                  return (
+                    <div key={`trv-${v}-${i}`} className="flex items-center justify-between gap-unit-2 border-b border-outline-variant/20 pb-1">
+                      <span className="text-[11px] font-label-bold text-on-surface">{s.label} <span className="text-on-surface-variant font-telemetry">· {distOf(i)}</span></span>
+                      <button id={`travbtn-${v}-${i}`} className={"px-2 h-5 border border-outline-variant text-[9px] font-label-bold transition-colors " + (on ? "bg-error text-on-error" : "bg-surface-variant hover:bg-error hover:text-on-error")} onClick={() => declareTravaux(v, i)}>{on ? "LEVER" : "DÉCLARER"}</button>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+          <p className="text-[9px] font-telemetry text-on-surface-variant/60 mt-unit-3">{"Déclarer un secteur en travaux le rend rouge (occupé) : le convoi s'y arrête (mêmes alertes), sauf autorisation ou déviation sur la Voie 2."}</p>
         </div>
       </div>
 
