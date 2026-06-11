@@ -74,13 +74,16 @@ const reasonOf = (i: number) =>
   SECT_V1[i].travaux ? "TRAVAUX" : i === OCC_INDEX ? `OCCUPÉ ${OCC_TRAIN}` : "";
 const distOf = (i: number) =>
   (SECT_V1[i].b - SECT_V1[i].a).toFixed(1) + " km";
-const motifText = (i: number) =>
-  i === OCC_INDEX ? `occupé par ${OCC_TRAIN}` : "en TRAVAUX";
 // Poste protégeant l'entrée d'un secteur (poste situé à la limite du secteur)
 const junctionBefore = (i: number) =>
   JUNCTIONS.find((jj) => Math.abs((jj.carL + jj.carR) / 2 - SECT_V1[i].a) < 0.1);
 const junctionAt = (pk: number) =>
   JUNCTIONS.find((jj) => Math.abs((jj.carL + jj.carR) / 2 - pk) < 0.1);
+// Déviation possible si le secteur a AU MOINS un poste (avant OU après).
+// Secteur courant = 2 postes (contournement + retour). Secteur terminus = 1 poste
+// (1er secteur : poste après ; dernier : poste avant) → bascule sans retour.
+const canBypass = (i: number) =>
+  !!junctionBefore(i) || !!junctionAt(SECT_V1[i].b);
 // Poste de communication le plus proche (pour changer de voie)
 const nearestCrossPoste = (pk: number) => {
   let best: Junction | null = null;
@@ -127,7 +130,7 @@ const fmtPK = (pk: number) => {
 export default function Home() {
   const trainPK = useRef(CASA);
   const speed = useRef(40);
-  const isPaused = useRef(false);
+  const isPaused = useRef(true); // mouvement en pause par défaut
   const dir = useRef(1); // sens : +1 aller (→), -1 retour (←)
   const holdUntil = useRef(0); // arrêt temporaire au terminus (timestamp ms)
   const authSect = useRef<Record<number, boolean[]>>({
@@ -138,12 +141,17 @@ export default function Home() {
     1: SECT_V1.map((s) => !!s.travaux),
     2: SECT_V2.map((s) => !!s.travaux),
   }); // travaux par voie + secteur
+  const bypassRef = useRef<Record<number, boolean[]>>({
+    1: SECT_V1.map(() => false),
+    2: SECT_V2.map(() => false),
+  }); // contournement armé par voie + secteur (déviation auto aux 2 postes)
   const curSec = useRef(-1); // index du secteur courant du convoi
   const curVoie = useRef(1); // voie du secteur courant
   const trainVoie = useRef(1); // voie courante du train (1 ou 2)
   const armRef = useRef(""); // clé d'état des icônes (dédup du rafraîchissement)
-  const aigEnabled = useRef(true); // l'admin a activé l'aiguillage (ON par défaut)
-  const soundEnabled = useRef(true); // son de l'alarme danger
+  const aigEnabled = useRef(false); // l'admin doit autoriser l'aiguillage (OFF = sécurisé par défaut)
+  const pendingTrav = useRef<{ v: number; i: number } | null>(null); // secteur déclaré (pour le popup)
+  const soundEnabled = useRef(false); // son de l'alarme danger (coupé par défaut)
   const crossRoute = useRef<
     { startPK: number; endPK: number; fromY: number; toY: number } | null
   >(null); // traversée diagonale en cours
@@ -253,14 +261,12 @@ export default function Home() {
     const blocked = work && !auth;
     const state = blocked ? reasonNow(v, i) : work && auth ? "AUTORISÉ" : "LIBRE";
     paintSeg(v, i);
-    if (v === 1) {
-      const label = document.getElementById(`seclabel-1-${i}`);
-      if (label) {
-        label.textContent = `${SECT_V1[i].label} · ${distOf(i)}${work ? " · " + state : ""}`;
-        label.className =
-          SECLABEL_BASE +
-          (blocked ? "text-error" : work && auth ? "text-secondary" : "text-on-surface-variant");
-      }
+    const label = document.getElementById(`seclabel-${v}-${i}`);
+    if (label) {
+      label.textContent = `${SECT_V1[i].label} · ${distOf(i)}${work ? " · " + state : ""}`;
+      label.className =
+        SECLABEL_BASE +
+        (blocked ? "text-error" : work && auth ? "text-secondary" : "text-on-surface-variant");
     }
     const badge = document.getElementById(`secbadge-${v}-${i}`);
     if (badge) {
@@ -301,8 +307,26 @@ export default function Home() {
 
   // L'admin sélectionne une voie + un secteur et le déclare (ou lève) en travaux
   const declareTravaux = (v: number, i: number) => {
+    const otherV = v === 1 ? 2 : 1;
+    // Interdit : déclarer un secteur déjà occupé sur l'autre voie (une voie doit
+    // rester libre pour le contournement, sinon le train serait totalement bloqué).
+    if (!travauxRef.current[v][i] && workNow(otherV, i)) {
+      const msg = `Refusé — ${SECT_V1[i].label} déjà occupé sur la Voie ${otherV}. Une voie doit rester libre pour le contournement.`;
+      const m = document.getElementById("trav-msg");
+      if (m) {
+        m.textContent = "⛔ " + msg;
+        m.className = "text-[10px] font-label-bold text-error mt-unit-3 blink-red";
+      }
+      addLog(`[TRV] Refusé — V${v} ${SECT_V1[i].label} : V${otherV} déjà occupé`);
+      return;
+    }
+    const tm = document.getElementById("trav-msg");
+    if (tm) tm.textContent = "";
     travauxRef.current[v][i] = !travauxRef.current[v][i];
-    if (!travauxRef.current[v][i]) authSect.current[v][i] = false; // remet l'autorisation à zéro
+    if (!travauxRef.current[v][i]) {
+      authSect.current[v][i] = false; // remet l'autorisation à zéro
+      bypassRef.current[v][i] = false; // retire le contournement
+    }
     refreshSector(v, i);
     updateBlockedCount();
     const b = document.getElementById(`travbtn-${v}-${i}`);
@@ -317,6 +341,91 @@ export default function Home() {
         ? `[TRV] Travaux DÉCLARÉS — V${v} ${SECT_V1[i].label}`
         : `[TRV] Travaux levés — V${v} ${SECT_V1[i].label}`
     );
+    // Contournement proposé seulement si le secteur a un poste avant ET après
+    // (pas pour le 1er ni le dernier secteur, côté terminus) — Voie 1 ET Voie 2.
+    if (travauxRef.current[v][i]) {
+      if (canBypass(i)) openReroutePopup(v, i);
+      else {
+        const tm2 = document.getElementById("trav-msg");
+        if (tm2) {
+          tm2.textContent = `ℹ️ V${v} · ${SECT_V1[i].label} (terminus) — contournement impossible : pas de poste des 2 côtés. Le secteur est occupé, le train s'y arrête.`;
+          tm2.className = "text-[10px] font-label-bold text-amber-400 mt-unit-3";
+        }
+        addLog(`[TRV] V${v} ${SECT_V1[i].label} (terminus) — contournement impossible (pas de poste des 2 côtés)`);
+      }
+    }
+  };
+
+  // Popup : à la déclaration d'un secteur occupé, propose le CONTOURNEMENT.
+  // Secteur courant (2 postes) → bascule + retour. Secteur terminus (1 poste) →
+  // bascule à l'unique poste, le train reste sur l'autre voie jusqu'au terminus.
+  const openReroutePopup = (v: number, i: number) => {
+    pendingTrav.current = { v, i };
+    const jLeft = junctionBefore(i); // poste de gauche (début du secteur)
+    const jRight = junctionAt(SECT_V1[i].b); // poste de droite (fin du secteur)
+    const set = (id: string, txt: string) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = txt;
+    };
+    const pair = (j: Junction | null | undefined) => (j ? `P${j.top}/P${j.bot}` : "?");
+    const other = v === 1 ? 2 : 1;
+    set("rr-sector", `Voie ${v} · ${SECT_V1[i].label} déclaré OCCUPÉ (travaux)`);
+    const both = !!jLeft && !!jRight;
+    if (both) {
+      set(
+        "rr-postes",
+        `Contournement par 2 postes — entrée ${pair(jLeft)} (↙ vers V${other}) · sortie ${pair(jRight)} (↗ retour V${v})`
+      );
+      set(
+        "rr-trains",
+        `• TTx-01 contourne le secteur sans s'arrêter :\n  ALLER → bascule à ${pair(jLeft)} puis revient à ${pair(jRight)}\n  RETOUR ← bascule à ${pair(jRight)} puis revient à ${pair(jLeft)}`
+      );
+    } else {
+      // Secteur terminus : un seul poste disponible
+      const solo = jLeft ?? jRight; // 1er secteur → poste après (droite) ; dernier → poste avant (gauche)
+      const cote = jLeft ? "avant le secteur (dernier secteur)" : "après le secteur (1er secteur)";
+      set(
+        "rr-postes",
+        `Déviation par 1 poste (terminus) — bascule à ${pair(solo)} ${cote} → reste sur V${other} jusqu'au terminus`
+      );
+      set(
+        "rr-trains",
+        `• TTx-01 évite le secteur sans s'arrêter :\n  bascule à ${pair(solo)} → V${other}, pas de retour (terminus au bout)`
+      );
+    }
+    const yes = document.getElementById("rr-yes");
+    const armed = bypassRef.current[v][i];
+    const solo = jLeft ?? jRight;
+    if (yes) yes.textContent = armed
+      ? "RETIRER LA DÉVIATION"
+      : both
+      ? `OUI — CONTOURNER (${pair(jLeft)} + ${pair(jRight)})`
+      : `OUI — DÉVIER (${pair(solo)})`;
+    const m = document.getElementById("reroute-popup");
+    m?.classList.remove("hidden");
+    m?.classList.add("flex");
+  };
+
+  // L'admin confirme : arme (ou retire) le contournement automatique aux 2 postes
+  const rerouteConfirm = () => {
+    const ctx = pendingTrav.current;
+    toggleModal("reroute-popup");
+    if (!ctx) return;
+    const { v, i } = ctx;
+    bypassRef.current[v][i] = !bypassRef.current[v][i];
+    const on = bypassRef.current[v][i];
+    pendingRoute.current = null;
+    lastStatus.current = "";
+    const jEntry = junctionBefore(i);
+    const jExit = junctionAt(SECT_V1[i].b);
+    addLog(
+      on
+        ? `[AIG] Contournement ARMÉ — V${v} ${SECT_V1[i].label} : déviation auto P${jEntry?.top}↔P${jExit?.top}`
+        : `[AIG] Contournement retiré — V${v} ${SECT_V1[i].label}`
+    );
+    // La déviation ne s'exécutera QUE si l'admin a autorisé l'aiguillage (sécurité).
+    if (on && !aigEnabled.current)
+      addLog(`[AIG] ⚠️ Activez AIGUILLAGE pour autoriser le changement de voie`);
   };
 
   // key = "stop:msg" | "appr:msg" | "move:msg"
@@ -448,12 +557,13 @@ export default function Home() {
     holdUntil.current = 0;
     crossRoute.current = null;
     pendingRoute.current = null;
-    setAig(true);
+    setAig(false); // sécurisé : pas de changement de voie sans autorisation
     armRef.current = "";
     curSec.current = -1;
     curVoie.current = 1;
     travauxRef.current = { 1: SECT_V1.map((s) => !!s.travaux), 2: SECT_V2.map((s) => !!s.travaux) };
     authSect.current = { 1: SECT_V1.map(() => false), 2: SECT_V2.map(() => false) };
+    bypassRef.current = { 1: SECT_V1.map(() => false), 2: SECT_V2.map(() => false) };
     [1, 2].forEach((v) =>
       SECT_V1.forEach((_, i) => {
         const b = document.getElementById(`travbtn-${v}-${i}`);
@@ -709,19 +819,25 @@ export default function Home() {
     let raf = 0;
     const animate = () => {
       if (!isPaused.current) {
-        // Aller-retour sur la Voie 1 : demi-tour aux terminus
+        // Demi-tour au terminus : le train RESTE sur la même voie à l'aller comme
+        // au retour. Il ne change de voie que par contournement ou aiguille manuelle.
+        const turnAround = () => {
+          crossRoute.current = null;
+          pendingRoute.current = null;
+          curSec.current = -1; // recalcule la coloration du secteur courant
+          holdUntil.current = Date.now() + 1500;
+          lastStatus.current = "";
+        };
         if (dir.current > 0 && trainPK.current >= MARRAKECH - 0.02) {
           trainPK.current = MARRAKECH;
           dir.current = -1;
-          holdUntil.current = Date.now() + 1500;
-          lastStatus.current = "";
-          addLog(`[MOUV] Arrivée MARRAKECH — demi-tour (Voie ${trainVoie.current})`);
+          turnAround();
+          addLog(`[MOUV] Arrivée MARRAKECH — demi-tour (Voie ${trainVoie.current}, retour ←)`);
         } else if (dir.current < 0 && trainPK.current <= CASA + 0.02) {
           trainPK.current = CASA;
           dir.current = 1;
-          holdUntil.current = Date.now() + 1500;
-          lastStatus.current = "";
-          addLog(`[MOUV] Arrivée CASABLANCA — repart (Voie ${trainVoie.current})`);
+          turnAround();
+          addLog(`[MOUV] Arrivée CASABLANCA — repart (Voie ${trainVoie.current}, aller →)`);
         }
 
         const holding = Date.now() < holdUntil.current;
@@ -736,6 +852,12 @@ export default function Home() {
         let bound = dir.current > 0 ? MARRAKECH : CASA;
         for (let i = 0; i < SECT_V1.length; i++) {
           if (!isBlocked(i)) continue;
+          // dévié : pas d'arrêt si l'aiguillage est AUTORISÉ et qu'un poste d'entrée
+          // existe dans le sens de marche (sinon le train s'arrête — sécurité).
+          if (aigEnabled.current && bypassRef.current[trainVoie.current][i]) {
+            const jEdir = dir.current > 0 ? junctionBefore(i) : junctionAt(SECT_V1[i].b);
+            if (jEdir) continue;
+          }
           const e = blockEntry(i);
           if (
             dir.current > 0
@@ -790,6 +912,25 @@ export default function Home() {
               : junctionAt(SECT_V1[stopIdx].b)
             : undefined;
 
+        // Déviation auto : à l'entrée du croisement, basculer pour éviter le secteur
+        // occupé. Secteur courant (2 postes) → revient à l'autre poste après le
+        // secteur. Secteur terminus (1 poste) → reste sur l'autre voie (pas de retour).
+        if (aigEnabled.current && !crossRoute.current && !pendingRoute.current) {
+          const tvc = trainVoie.current;
+          for (let i = 0; i < SECT_V1.length; i++) {
+            if (!bypassRef.current[tvc][i]) continue;
+            if (!(workNow(tvc, i) && !authSect.current[tvc][i])) continue; // bloqué sur ma voie
+            const jE = dir.current > 0 ? junctionBefore(i) : junctionAt(SECT_V1[i].b); // entrée (sens de marche)
+            const jX = dir.current > 0 ? junctionAt(SECT_V1[i].b) : junctionBefore(i); // sortie
+            if (!jE) continue; // pas de poste avant le secteur dans ce sens → pas de déviation
+            if (trainPK.current >= jE.carL && trainPK.current <= jE.carR) {
+              doCross(JUNCTIONS.indexOf(jE), dir.current > 0 ? "L" : "R"); // sort vers l'autre voie
+              if (jX) pendingRoute.current = { idx: JUNCTIONS.indexOf(jX), side: dir.current > 0 ? "R" : "L" }; // revient après (si poste de sortie)
+              break;
+            }
+          }
+        }
+
         // Itinéraire tracé : bascule automatique à l'arrivée au croisement
         if (pendingRoute.current) {
           const pj = JUNCTIONS[pendingRoute.current.idx];
@@ -828,47 +969,48 @@ export default function Home() {
         if (pkVal) pkVal.textContent = lbl;
         if (cardPk) cardPk.textContent = lbl;
 
+        const tv = trainVoie.current;
+        const otherV = tv === 1 ? 2 : 1;
         if (holding) {
           setTrainStatus("move:⏸ DEMI-TOUR au terminus");
           pushAlerts("hold", []);
           stopAlarm();
-        } else if (trainVoie.current === 2) {
-          // dévié sur la Voie 2 (libre) pour contourner un secteur
-          setTrainStatus(
-            dir.current < 0 ? "move:Voie 2 ← — déviation (retour)" : "move:Voie 2 → — déviation"
-          );
-          pushAlerts("v2", [{ text: `↪ Voie 2 — secteur contourné`, tone: "ok" }]);
-          stopAlarm();
         } else if (stopIdx >= 0 && !moving) {
-          // Arrêt au poste avant le secteur bloqué (aller comme retour)
-          const n = blockJ ? blockJ.top : "?";
+          // Arrêt au poste avant un secteur bloqué — sur Voie 1 OU Voie 2
+          const n = blockJ ? (tv === 1 ? blockJ.top : blockJ.bot) : "?";
           setTrainStatus(
-            `stop:Poste ${n} — ${SECT_V1[stopIdx].label} ${motifText(stopIdx)} — CHANGER DE VOIE`
+            `stop:Poste ${n} — V${tv} ${SECT_V1[stopIdx].label} ${motifNow(stopIdx)} — CHANGER DE VOIE`
           );
-          pushAlerts(`stop-${stopIdx}`, [
-            { text: `⛔ ARRÊT — Poste ${n} : ${SECT_V1[stopIdx].label} ${motifText(stopIdx)}`, tone: "danger" },
-            { text: `👉 Cliquez une aiguille (L/R) au Poste ${n} pour basculer en Voie 2`, tone: "danger" },
+          pushAlerts(`stop-${tv}-${stopIdx}`, [
+            { text: `⛔ ARRÊT — Poste ${n} : ${SECT_V1[stopIdx].label} ${motifNow(stopIdx)} (Voie ${tv})`, tone: "danger" },
+            { text: `👉 Cliquez une aiguille (L/R) au Poste ${n} pour basculer en Voie ${otherV}`, tone: "danger" },
             { text: `… ou attendez la libération du secteur`, tone: "warn" },
           ]);
           startAlarm();
           armIdx = blockJ ? JUNCTIONS.indexOf(blockJ) : -1;
         } else if (stopIdx >= 0 && dStop <= SECTOR_KM) {
-          // Zone d'attention de 60 km avant le secteur bloqué (dans le sens de marche)
-          const n = blockJ ? blockJ.top : "?";
-          const soundOn = dStop <= HALF_KM; // son au 1/2 de la zone (30 km)
+          // Zone d'attention de 60 km avant le secteur bloqué — Voie 1 OU Voie 2
+          const n = blockJ ? (tv === 1 ? blockJ.top : blockJ.bot) : "?";
+          const soundOn = dStop <= HALF_KM;
           setTrainStatus(
-            `appr:${SECT_V1[stopIdx].label} ${motifText(stopIdx)} — changez de voie (Poste ${n}) pour ne pas stopper`
+            `appr:V${tv} ${SECT_V1[stopIdx].label} ${motifNow(stopIdx)} — basculez Voie ${otherV} (Poste ${n}) pour ne pas stopper`
           );
           const cards: { text: string; tone: "danger" | "warn" | "ok" }[] = [
-            { text: `🚨 DANGER — ${SECT_V1[stopIdx].label} ${motifText(stopIdx)}`, tone: "danger" },
+            { text: `🚨 DANGER — Voie ${tv} : ${SECT_V1[stopIdx].label} ${motifNow(stopIdx)}`, tone: "danger" },
             { text: `⚠️ ATTENTION — arrêt dans ${dStop.toFixed(0)} km si rien n'est fait`, tone: "warn" },
-            { text: `👉 Aiguille L/R au Poste ${n} → Voie 2 (évite l'arrêt)`, tone: "warn" },
+            { text: `👉 Aiguille L/R au Poste ${n} → Voie ${otherV} (évite l'arrêt)`, tone: "warn" },
           ];
           if (soundOn) cards.push({ text: `🔊 ALARME — basculez MAINTENANT`, tone: "danger" });
-          pushAlerts(`appr-${stopIdx}-${Math.ceil(dStop)}`, cards);
+          pushAlerts(`appr-${tv}-${stopIdx}-${Math.ceil(dStop)}`, cards);
           if (soundOn) startAlarm();
           else stopAlarm();
           armIdx = blockJ ? JUNCTIONS.indexOf(blockJ) : -1;
+        } else if (tv === 2) {
+          setTrainStatus(
+            dir.current < 0 ? "move:Voie 2 ← — retour / déviation" : "move:Voie 2 → — déviation"
+          );
+          pushAlerts("v2", [{ text: `↪ Voie 2 — circulation normale`, tone: "ok" }]);
+          stopAlarm();
         } else {
           setTrainStatus(
             dir.current > 0
@@ -922,16 +1064,6 @@ export default function Home() {
   const Conn = ({ pk, top, height }: { pk: number; top: number; height: number }) => (
     <div className="absolute w-px bg-on-surface-variant/40 -translate-x-1/2" style={{ left: pkToPx(pk), top, height }} />
   );
-  const SectorBarV2 = ({ s, y }: { s: Secteur; y: number }) => {
-    const x = pkToPx(s.a);
-    const w = pkToPx(s.b) - x;
-    return (
-      <div className="absolute" style={{ left: x, width: w, top: y }}>
-        <div className="h-px w-full bg-secondary/40" />
-        <span className="absolute left-1/2 -translate-x-1/2 top-1 text-[8px] font-telemetry whitespace-nowrap text-on-surface-variant">{s.label}</span>
-      </div>
-    );
-  };
   const TopBox = ({ name, pk, tone }: { name: string; pk: number; tone: "pcv" | "gare" | "base" | "limite" }) => {
     const cls = { pcv: "border-outline-variant text-on-surface-variant", gare: "border-primary text-primary", base: "border-amber-500 text-amber-500 bg-amber-500/10", limite: "border-error text-error bg-error/10" }[tone];
     return (
@@ -1018,7 +1150,7 @@ export default function Home() {
           <div className="absolute top-2 left-2 z-40 flex flex-col gap-1">
             <button onClick={() => applyZoom(1.3)} title="Zoom avant" className="w-6 h-6 bg-surface-container border border-outline-variant text-on-surface text-[16px] leading-none font-bold hover:bg-surface-variant hover:text-primary">+</button>
             <button onClick={() => applyZoom(1 / 1.3)} title="Zoom arrière" className="w-6 h-6 bg-surface-container border border-outline-variant text-on-surface text-[16px] leading-none font-bold hover:bg-surface-variant hover:text-primary">−</button>
-            <button id="sound-btn" onClick={toggleSound} title="Son de l'alarme danger on/off" className="w-6 h-6 bg-surface-container border border-outline-variant text-secondary text-[13px] leading-none hover:bg-surface-variant">🔊</button>
+            <button id="sound-btn" onClick={toggleSound} title="Son de l'alarme danger on/off" className="w-6 h-6 bg-surface-container border border-outline-variant text-error text-[13px] leading-none hover:bg-surface-variant">🔇</button>
           </div>
           <div className="absolute inset-0 overflow-x-auto overflow-y-auto custom-scrollbar cursor-grab active:cursor-grabbing" id="sector-scroll">
             <div className="relative" style={{ width: TRACK_WIDTH, height: 380 }}>
@@ -1077,13 +1209,19 @@ export default function Home() {
                   </span>
                 );
               })}
-              {/* Secteurs Voie 2 — couleur de ligne + label */}
-              {SECT_V2.map((s, i) => (
-                <span key={`v2-${i}`}>
-                  <div id={`seg-2-${i}`} onClick={() => authorizeSector(2, i)} title={`${s.label} V2`} className={SEG_BASE + "bg-transparent"} style={{ left: pkToPx(s.a), width: pkToPx(s.b) - pkToPx(s.a), top: V2_Y }} />
-                  <SectorBarV2 s={s} y={V2_Y - 14} />
-                </span>
-              ))}
+              {/* Secteurs Voie 2 — couleur de ligne + libellé d'état (comme Voie 1) */}
+              {SECT_V2.map((s, i) => {
+                const x = pkToPx(s.a), w = pkToPx(s.b) - x;
+                return (
+                  <span key={`v2-${i}`}>
+                    <div id={`seg-2-${i}`} onClick={() => authorizeSector(2, i)} title={`${s.label} V2`} className={SEG_BASE + "bg-transparent"} style={{ left: x, width: w, top: V2_Y }} />
+                    <div className="absolute" style={{ left: x, width: w, top: V2_Y + 16 }}>
+                      <div className="h-px w-full bg-secondary/40" />
+                      <span id={`seclabel-2-${i}`} className={SECLABEL_BASE + "text-on-surface-variant"}>{`${s.label} · ${distOf(i)}`}</span>
+                    </div>
+                  </span>
+                );
+              })}
 
               {/* Postes + signalisation */}
               {JUNCTIONS.map((j, ji) => (
@@ -1210,11 +1348,11 @@ export default function Home() {
           <div className="flex items-center gap-unit-3"><span className="text-[9px] font-label-bold text-on-surface-variant">T1 SPD</span><input className="w-24" id="speed-slider" max="120" min="0" type="range" defaultValue="40" onChange={handleSlider} /></div>
           <div className="h-4 w-px bg-outline-variant"></div>
           <button className="px-2 h-5 bg-secondary-container text-on-secondary-container border border-outline-variant text-[9px] font-label-bold hover:opacity-90 transition" onClick={() => toggleModal("auth-modal")}>AUTORISATIONS ▸</button>
-          <button id="aig-btn" className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold text-secondary hover:opacity-90 transition" onClick={() => setAig(!aigEnabled.current)} title="ADMIN : activer/désactiver l'aiguillage (rend les icônes cliquables)">🔀 AIGUILLAGE ON</button>
+          <button id="aig-btn" className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold text-on-surface-variant hover:opacity-90 transition" onClick={() => setAig(!aigEnabled.current)} title="ADMIN : autoriser/verrouiller le changement de voie (manuel ET contournement auto)">🔀 AIGUILLAGE OFF</button>
           <button id="voie-btn" className="px-2 h-5 bg-primary-container text-on-primary-container border border-outline-variant text-[9px] font-label-bold hover:opacity-90 transition opacity-40" onClick={handleChangeVoie} title="Aiguillage : changer la voie du train au poste le plus proche">⇄ CHANGER VOIE</button>
           <button id="follow-btn" className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold text-secondary hover:opacity-90 transition" onClick={() => setFollow(!autoFollow.current)} title="Recentrage automatique sur le train (la molette le met en pause)">⊙ SUIVI ON</button>
           <div className="flex gap-unit-2">
-            <button className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold hover:bg-primary-container hover:text-on-primary-container transition-colors" id="pause-btn" onClick={handlePause}>PAUSE</button>
+            <button className="px-2 h-5 bg-surface-variant bg-primary-container border border-outline-variant text-[9px] font-label-bold hover:opacity-90 transition-colors" id="pause-btn" onClick={handlePause}>REPRENDRE</button>
             <button className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold hover:bg-error-container hover:text-on-error-container transition-colors" onClick={resetSimulation}>RESET</button>
           </div>
         </div>
@@ -1274,7 +1412,31 @@ export default function Home() {
               </div>
             ))}
           </div>
-          <p className="text-[9px] font-telemetry text-on-surface-variant/60 mt-unit-3">{"Déclarer un secteur en travaux le rend rouge (occupé) : le convoi s'y arrête (mêmes alertes), sauf autorisation ou déviation sur la Voie 2."}</p>
+          <div id="trav-msg"></div>
+          <p className="text-[9px] font-telemetry text-on-surface-variant/60 mt-unit-3">{"Déclarer un secteur en travaux le rend rouge (occupé) : le convoi s'y arrête (mêmes alertes), sauf autorisation ou contournement. Un secteur ne peut être occupé que sur UNE voie à la fois (l'autre reste libre pour la déviation)."}</p>
+        </div>
+      </div>
+
+      {/* Popup déroutement — à la déclaration d'un secteur occupé */}
+      <div className="fixed inset-0 z-[110] bg-background/80 backdrop-blur-sm hidden items-center justify-center" id="reroute-popup">
+        <div className="bg-[#0d1e30] border border-error w-[440px] p-unit-6 shadow-2xl">
+          <div className="flex justify-between items-center mb-unit-3 border-b border-outline-variant pb-2">
+            <h3 className="text-error font-display-md text-[16px]">⚠️ SECTEUR OCCUPÉ — DÉROUTEMENT</h3>
+            <button className="material-symbols-outlined text-on-surface-variant hover:text-error" onClick={() => toggleModal("reroute-popup")}>close</button>
+          </div>
+          <div className="space-y-unit-2 text-[11px] font-telemetry text-on-surface">
+            <div id="rr-sector" className="text-error font-label-bold">—</div>
+            <div id="rr-postes" className="text-on-surface-variant text-[10px]">—</div>
+            <div className="border-t border-outline-variant/40 pt-2">
+              <div className="text-[10px] font-label-bold text-primary mb-1">CONVOIS CONCERNÉS</div>
+              <div id="rr-trains" className="text-on-surface-variant whitespace-pre-line text-[10px]">—</div>
+            </div>
+            <div className="text-amber-300 mt-2">Contourner le secteur par les 2 postes (entrée + sortie) pour éviter l&apos;arrêt — aller ET retour ?</div>
+          </div>
+          <div className="flex gap-unit-2 mt-unit-4">
+            <button id="rr-yes" className="flex-1 bg-secondary-container text-on-secondary-container font-label-bold py-2 text-[10px] hover:opacity-90 active:scale-[0.98] transition" onClick={rerouteConfirm}>OUI — DÉROUTER</button>
+            <button className="px-3 bg-surface-variant border border-outline-variant font-label-bold py-2 text-[10px] hover:opacity-90 transition" onClick={() => toggleModal("reroute-popup")}>PLUS TARD</button>
+          </div>
         </div>
       </div>
 
