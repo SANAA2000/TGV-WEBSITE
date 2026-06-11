@@ -149,7 +149,7 @@ export default function Home() {
   const curVoie = useRef(1); // voie du secteur courant
   const trainVoie = useRef(1); // voie courante du train (1 ou 2)
   const armRef = useRef(""); // clé d'état des icônes (dédup du rafraîchissement)
-  const aigEnabled = useRef(false); // l'admin doit autoriser l'aiguillage (OFF = sécurisé par défaut)
+  const aigEnabled = useRef(true); // aiguillage autorisé (ON par défaut)
   const pendingTrav = useRef<{ v: number; i: number } | null>(null); // secteur déclaré (pour le popup)
   const soundEnabled = useRef(false); // son de l'alarme danger (coupé par défaut)
   const crossRoute = useRef<
@@ -557,7 +557,7 @@ export default function Home() {
     holdUntil.current = 0;
     crossRoute.current = null;
     pendingRoute.current = null;
-    setAig(false); // sécurisé : pas de changement de voie sans autorisation
+    setAig(true); // aiguillage autorisé (ON par défaut)
     armRef.current = "";
     curSec.current = -1;
     curVoie.current = 1;
@@ -1348,7 +1348,7 @@ export default function Home() {
           <div className="flex items-center gap-unit-3"><span className="text-[9px] font-label-bold text-on-surface-variant">T1 SPD</span><input className="w-24" id="speed-slider" max="120" min="0" type="range" defaultValue="40" onChange={handleSlider} /></div>
           <div className="h-4 w-px bg-outline-variant"></div>
           <button className="px-2 h-5 bg-secondary-container text-on-secondary-container border border-outline-variant text-[9px] font-label-bold hover:opacity-90 transition" onClick={() => toggleModal("auth-modal")}>AUTORISATIONS ▸</button>
-          <button id="aig-btn" className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold text-on-surface-variant hover:opacity-90 transition" onClick={() => setAig(!aigEnabled.current)} title="ADMIN : autoriser/verrouiller le changement de voie (manuel ET contournement auto)">🔀 AIGUILLAGE OFF</button>
+          <button id="aig-btn" className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold text-secondary hover:opacity-90 transition" onClick={() => setAig(!aigEnabled.current)} title="ADMIN : autoriser/verrouiller le changement de voie (manuel ET contournement auto)">🔀 AIGUILLAGE ON</button>
           <button id="voie-btn" className="px-2 h-5 bg-primary-container text-on-primary-container border border-outline-variant text-[9px] font-label-bold hover:opacity-90 transition opacity-40" onClick={handleChangeVoie} title="Aiguillage : changer la voie du train au poste le plus proche">⇄ CHANGER VOIE</button>
           <button id="follow-btn" className="px-2 h-5 bg-surface-variant border border-outline-variant text-[9px] font-label-bold text-secondary hover:opacity-90 transition" onClick={() => setFollow(!autoFollow.current)} title="Recentrage automatique sur le train (la molette le met en pause)">⊙ SUIVI ON</button>
           <div className="flex gap-unit-2">
